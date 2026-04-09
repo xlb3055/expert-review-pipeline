@@ -69,15 +69,18 @@ def parse_trace_file(filepath: str) -> TraceAnalysis:
 
         entry_type = entry.get("type", "")
 
-        # 统计 human 消息轮次
-        if entry_type == "human":
+        # 统计用户消息轮次（兼容 "human" 和 "user" 两种格式）
+        if entry_type in ("human", "user"):
             analysis.conversation_rounds += 1
 
-        # 提取模型名（从 assistant 消息）
+        # 提取模型名（从 assistant 消息，或从任意含 model 字段的记录）
         if entry_type == "assistant":
             model = entry.get("model", "")
             if model:
                 models_seen.add(model)
+        # 兼容：某些 trace 格式在其他类型的记录中也有 model 字段
+        if "model" in entry and entry["model"]:
+            models_seen.add(entry["model"])
 
         # 检测工具调用
         if entry_type == "tool_use":

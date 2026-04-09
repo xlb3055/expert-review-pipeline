@@ -78,18 +78,26 @@ def check_model_sota(trace: TraceAnalysis) -> dict:
             "passed": True,
             "detail": f"模型 {trace.model_name} 为 opus 系列",
         }
+    if not trace.model_name:
+        # trace 中未记录模型信息（Claude Code transcript 的常见情况），标记待复核
+        return {
+            "check": "model_sota",
+            "passed": False,
+            "detail": "Trace 中未检测到模型信息，无法自动判定是否使用 opus，需人工确认",
+            "action": "manual_review",
+        }
     return {
         "check": "model_sota",
         "passed": False,
-        "detail": f"模型 {trace.model_name or '未知'} 不是 claude-opus 系列，请使用 claude-opus 模型",
+        "detail": f"模型 {trace.model_name} 不是 claude-opus 系列，请使用 claude-opus 模型",
         "action": "reject",
     }
 
 
 def check_final_product_exists(fields: dict) -> dict:
     """检查 4: 最终产物链接或附件不为空。"""
-    link = extract_link_url(fields.get("最终产物链接", ""))
-    attachment = extract_attachment_file_token(fields.get("最终产物附件"))
+    link = extract_link_url(fields.get("最终产物", ""))
+    attachment = extract_attachment_file_token(fields.get("最终附件"))
 
     if link or attachment:
         source = "链接" if link else "附件"

@@ -20,16 +20,28 @@ import time
 import uuid
 from pathlib import Path
 
-from daytona import (
-    CreateSandboxFromSnapshotParams,
-    Daytona,
-    DaytonaConfig,
-    DaytonaError,
-    DaytonaNotFoundError,
-    Resources,
-    SandboxState,
-    SessionExecuteRequest,
-)
+try:
+    from daytona_sdk import (
+        CreateSandboxFromSnapshotParams,
+        Daytona,
+        DaytonaConfig,
+        DaytonaError,
+        DaytonaNotFoundError,
+        Resources,
+        SandboxState,
+        SessionExecuteRequest,
+    )
+except ImportError:
+    from daytona import (
+        CreateSandboxFromSnapshotParams,
+        Daytona,
+        DaytonaConfig,
+        DaytonaError,
+        DaytonaNotFoundError,
+        Resources,
+        SandboxState,
+        SessionExecuteRequest,
+    )
 
 from feishu_utils import (
     check_required_env,
@@ -44,7 +56,7 @@ from trace_parser import truncate_trace_content
 # ---------- 配置 ----------
 
 DAYTONA_API_KEY = os.environ.get("DAYTONA_API_KEY", "")
-SNAPSHOT_NAME = os.environ.get("SNAPSHOT_NAME", "claude-code-snapshot")
+SNAPSHOT_NAME = os.environ.get("SNAPSHOT_NAME", "daytona-medium")
 SANDBOX_NAME_PREFIX = os.environ.get("SANDBOX_NAME_PREFIX", "expert_review")
 
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api")
@@ -195,7 +207,7 @@ def _build_input_text(fields: dict, trace_content: str) -> str:
     expert_name = normalize_field_value(fields.get("专家姓名", ""))
     expert_id = normalize_field_value(fields.get("专家ID", ""))
     position = normalize_field_value(fields.get("岗位方向", ""))
-    product_link = extract_link_url(fields.get("最终产物链接", ""))
+    product_link = extract_link_url(fields.get("最终产物", ""))
 
     parts = [
         "# 专家考核产物 — AI 评审输入",
@@ -292,7 +304,7 @@ def run_ai_review(record_id: str) -> int:
 
     # 2. 读取已下载的 trace 文件内容（由 pre_screen.py 下载到 TRACE_INPUT_PATH）
     print("\n--- 读取 Trace 内容 ---")
-    trace_content = truncate_trace_content(TRACE_INPUT_PATH, max_rounds=50, max_bytes=512000)
+    trace_content = truncate_trace_content(TRACE_INPUT_PATH, max_rounds=20, max_bytes=100000)
     print(f"Trace 内容长度: {len(trace_content)} 字符")
 
     # 3. 组装输入文本
@@ -382,6 +394,23 @@ def run_ai_review(record_id: str) -> int:
                 raise
         print(f"沙箱已创建: {sandbox.id}")
 
+        # 6.5 安装 Claude Code CLI（若沙箱未预装）
+        print("\n--- 检查并安装 Claude Code CLI ---")
+        check_claude = sandbox.process.exec("which claude || echo 'NOT_FOUND'")
+        if "NOT_FOUND" in (check_claude.result or ""):
+            print("Claude Code CLI 未安装，正在安装...")
+            install_result = sandbox.process.exec("npm install -g @anthropic-ai/claude-code 2>&1 | tail -3")
+            print(f"安装结果: {(install_result.result or '')[:200]}")
+            # 验证安装
+            verify = sandbox.process.exec("claude --version 2>&1 || echo 'INSTALL_FAILED'")
+            if "INSTALL_FAILED" in (verify.result or ""):
+                print(f"错误: Claude Code CLI 安装失败", file=sys.stderr)
+                _save_error_result("Claude Code CLI 安装失败")
+                return 1
+            print(f"Claude Code CLI 版本: {(verify.result or '').strip()}")
+        else:
+            print(f"Claude Code CLI 已存在: {(check_claude.result or '').strip()}")
+
         # 7. 上传文件到沙箱
         print("\n--- 上传文件到沙箱 ---")
         sandbox.process.exec(f"mkdir -p {REMOTE_TMP_DIR}")
@@ -460,8 +489,10 @@ def run_ai_review(record_id: str) -> int:
             except Exception:
                 pass
             elapsed = time.time() - start_time
-            if int(elapsed) % 60 == 0 and int(elapsed) > 0:
-                print(f"  ... 运行中 {elapsed:.0f}s")
+            if int(elapsed) % 30 == 0 and int(elapsed) > 0:
+                print(f"  ... 运行中 {elapsed:.0f}s, stdout={len(stdout)}B, stderr={len(stderr)}B")
+                if stderr and len(stderr) < 500:
+                    print(f"  stderr: {stderr.strip()[:300]}")
         else:
             print(f"Claude 超时（{CLAUDE_TIMEOUT}s）")
             try:
@@ -515,9 +546,36 @@ def run_ai_review(record_id: str) -> int:
             _save_error_result(f"JSON 解析失败: {e}")
             return 1
 
-        # 提取 expert_review_result（若有外层包装）
+        # 提取评审结果（处理多层包装）
+        # 情况 1: Claude API 包装 {"type":"result", "result": "...json string..."}
+        if isinstance(result_obj.get("result"), str):
+            inner_text = result_obj["result"]
+            # 从 markdown 代码块中提取 JSON
+            m = re.search(r"```json\s*(.*?)\s*```", inner_text, re.DOTALL)
+            if m:
+                inner_text = m.group(1).strip()
+            # 从大括号区块提取
+            fb = inner_text.find("{")
+            lb = inner_text.rfind("}")
+            if fb != -1 and lb > fb:
+                try:
+                    result_obj = json.loads(inner_text[fb:lb + 1])
+                except json.JSONDecodeError:
+                    pass
+
+        # 情况 2: schema 包装 {"expert_review_result": {...}}
         if "expert_review_result" in result_obj:
             result_obj = result_obj["expert_review_result"]
+
+        # 情况 3: 非标准键名 {"dimensions": {...}} → 转换为标准格式
+        if "dimensions" in result_obj and "task_complexity" not in result_obj:
+            dims = result_obj["dimensions"]
+            result_obj = {
+                **dims,
+                "total_score": result_obj.get("total_score", 0),
+                "overall_assessment": result_obj.get("overall_assessment", ""),
+                "trace_highlights": result_obj.get("trace_highlights", []),
+            }
 
         # 12. 保存结果
         result_dir = os.path.dirname(AI_REVIEW_RESULT_PATH)
