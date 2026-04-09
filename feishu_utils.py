@@ -159,7 +159,7 @@ def download_attachment(token: str, file_token: str, output_path: str) -> None:
     print(f"附件已下载: {output_path} ({os.path.getsize(output_path)} 字节)")
 
 
-def extract_attachment_file_token(field_value) -> str | None:
+def extract_attachment_file_token(field_value):
     """
     从飞书附件字段值中提取第一个 file_token。
 

@@ -21,7 +21,7 @@ class TraceAnalysis:
     has_tool_calls: bool = False          # 是否包含工具调用记录
     tool_call_count: int = 0             # 工具调用次数
     total_lines: int = 0                  # JSONL 总行数
-    errors: list[str] = field(default_factory=list)  # 解析错误信息
+    errors: list = field(default_factory=list)  # 解析错误信息
 
 
 def parse_trace_file(filepath: str) -> TraceAnalysis:
