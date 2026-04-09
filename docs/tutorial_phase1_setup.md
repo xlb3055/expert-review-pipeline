@@ -567,6 +567,207 @@ AI评审结果     ← 完整的 AI 评审 JSON
 
 ---
 
+---
+
+## Phase 5：火山引擎流水线上线
+
+### 这一阶段在干什么
+
+将本地手动执行的流程部署到火山引擎持续交付流水线上，实现通过 Webhook 触发自动执行。完成后，整个链路变成：
+
+```
+HTTP POST(record_id) → 火山 Webhook → 拉取 GitHub 代码 → 执行粗筛 → AI 评审 → 回填飞书
+```
+
+### 前置条件
+
+- Phase 1-4 全部完成（本地流水线跑通）
+- 代码已推送到 GitHub
+- 拥有火山引擎账号（持续交付服务已开通）
+- 本地已安装 Docker
+
+---
+
+### Step 1：创建流水线
+
+1. 打开 [火山引擎持续交付控制台](https://console.volcengine.com/pipeline/)
+2. 进入「流水线管理」→ 点击 **「新建流水线」**
+3. 选择 **「空白流水线」**
+4. 名称填：`专家考核评审流水线`
+
+### Step 2：配置代码源
+
+1. 在流水线编辑页，配置 **代码源**
+2. 代码平台选择 **GitHub**（需先完成 OAuth 授权关联 GitHub 账号）
+3. 仓库地址必须用 **HTTPS 格式**：`https://github.com/你的用户名/expert-review-pipeline.git`
+4. 分支选择：`main`
+
+> **踩坑记录**：仓库必须是 **Public** 的，否则火山引擎拉取时会报 404。如果不想公开，需要在代码源配置中提供 GitHub Personal Access Token。
+
+代码拉取后会放在 `/workspace/` 目录下。
+
+### Step 3：构建专用 Docker 镜像
+
+#### 为什么需要自定义镜像
+
+火山引擎的命令执行步骤需要指定 Docker 镜像作为执行环境。如果不在镜像中预装依赖，每次运行都要 `pip install`，下载速度慢（20-30 KB/s），白白浪费 5-10 分钟。
+
+把 `requests` 和 `daytona-sdk` 预装到镜像中，启动后直接执行脚本，零等待。
+
+#### Dockerfile
+
+在项目根目录创建 `Dockerfile`：
+
+```dockerfile
+# 专家考核评审流水线 — 执行环境镜像
+# 基于公司基础镜像，预装流水线所需的 Python 依赖
+
+FROM meetchances-cn-beijing.cr.volces.com/ci/common:1.0.5
+
+# 预装流水线依赖，避免每次运行都下载
+RUN pip install --no-cache-dir requests daytona-sdk
+```
+
+#### 构建 & 推送
+
+```bash
+# 1. 登录火山引擎镜像仓库
+docker login meetchances-cn-beijing.cr.volces.com -u <用户名> -p <密码>
+
+# 2. 构建镜像
+cd ~/Desktop/expert-review-pipeline
+docker build -t meetchances-cn-beijing.cr.volces.com/ci/expert-review:1.0.0 .
+
+# 3. 推送镜像
+docker push meetchances-cn-beijing.cr.volces.com/ci/expert-review:1.0.0
+```
+
+镜像仓库的用户名和密码在火山引擎「镜像仓库」控制台中获取。
+
+> **提示**：后续如果需要新增 Python 依赖，修改 Dockerfile 的 `RUN pip install` 行，重新 build 并推送新版本（如 `1.0.1`），然后在流水线中更新镜像地址。
+
+### Step 4：配置 Webhook 触发器
+
+1. 在流水线的 **「触发配置」** 中，选择 **Webhook 触发**
+2. 创建后会生成一个 **Webhook URL**（形如 `https://cp.volces.com/v2/webhook/xxx`）
+3. **记下这个 URL**，Phase 6 飞书按钮要用
+
+### Step 5：配置环境变量
+
+在流水线的 **「变量管理」** 中添加以下 7 个变量：
+
+| 变量名 | 值 | 是否密钥 |
+|--------|-----|---------|
+| `FEISHU_APP_ID` | 飞书应用 ID | 是 |
+| `FEISHU_APP_SECRET` | 飞书应用密钥 | 是 |
+| `BITABLE_APP_TOKEN` | 多维表格 app token | 是 |
+| `BITABLE_TABLE_ID` | 数据表 ID | 是 |
+| `DAYTONA_API_KEY` | Daytona API 密钥 | 是 |
+| `OPENROUTER_API_KEY` | OpenRouter API 密钥 | 是 |
+| `RECORD_ID` | 运行时传入（默认值可留空） | 否 |
+
+#### 关键：打开「环境变量」开关
+
+火山引擎的变量管理中定义的变量，**默认不会注入到 shell 环境中**。必须对每个变量：
+
+1. 点击变量右边的 **编辑图标**
+2. 找到 **「环境变量」** 开关
+3. **打开它**
+4. 点确定
+
+> **踩坑记录**：不打开这个开关，脚本中 `$RECORD_ID` 等变量全部为空，导致流水线报错"RECORD_ID 未设置"。这一步非常容易遗漏。
+
+### Step 6：配置命令执行步骤
+
+1. 在流水线编排中，添加一个 **「自定义环境命令执行」** 任务节点
+2. **镜像地址**填：
+
+```
+meetchances-cn-beijing.cr.volces.com/ci/expert-review:1.0.0
+```
+
+3. **命令**填：
+
+```bash
+cd /workspace && bash run_expert_review_pipeline.sh
+```
+
+就这么简单。所有环境变量通过 Step 5 注入，入口脚本 `run_expert_review_pipeline.sh` 负责检查依赖、执行粗筛、AI 评审、回填。
+
+### Step 7：手动运行测试
+
+1. 保存流水线
+2. 点 **「手动运行」**
+3. 在参数填写框中，`RECORD_ID` 填入测试行的 record_id（如 `recvgglWDZxZHZ`）
+4. 观察执行日志，确认各阶段正常完成
+
+预期日志输出：
+
+```
+===== 专家考核评审流水线 =====
+Record ID: recvgglWDZxZHZ
+
+===== 阶段0: 环境准备 =====
+Python 3.10.12
+requests OK
+daytona-sdk OK
+
+===== 阶段1: 脚本粗筛 =====
+[检查1] trace_exists: 通过
+[检查2] conversation_rounds: 通过
+...
+粗筛退出码: 0/2
+
+===== 阶段2: AI 评审 =====
+沙箱已创建: xxx
+Claude 于 xx.xs 内完成, exit_code=0
+
+===== 阶段3: 结果回填 =====
+飞书回填成功
+
+===== 流水线完成 =====
+```
+
+### Step 8：测试 Webhook 触发
+
+手动运行通过后，用 curl 模拟 Webhook 请求：
+
+```bash
+curl -X POST "你的Webhook URL" \
+  -H "Content-Type: application/json" \
+  -d '{"record_id": "recvgglWDZxZHZ"}'
+```
+
+确认流水线被成功触发。
+
+> **注意**：Webhook 触发时需要把请求体中的 `record_id` 映射到流水线变量 `RECORD_ID`。在触发器配置中设置「运行时变量」映射。
+
+### 踩坑记录汇总
+
+| 问题 | 原因 | 解决方案 |
+|------|------|---------|
+| `Invalid CodeRepo Scheme: must be http or https` | 代码源用了 SSH 格式 | 改用 HTTPS 格式仓库地址 |
+| `404 Not Found` 拉取仓库 | 仓库是 Private | 改成 Public，或配置 Token |
+| `Python 3.5.3` 无法运行 | 默认镜像太旧 | 使用自定义镜像 |
+| `pip install` 每次耗时 5-10 分钟 | 依赖未预装到镜像 | 构建预装依赖的镜像 |
+| `RECORD_ID 未设置` | 变量未注入到 shell | 变量管理中打开「环境变量」开关 |
+| 自定义镜像拉取卡住 | 镜像地址错误或网络问题 | 确认镜像已推送到正确的仓库 |
+
+### 耗时参考
+
+使用预装依赖的镜像后：
+
+| 阶段 | 耗时 |
+|------|------|
+| 代码拉取 | ~3 秒 |
+| 环境准备（依赖检查） | ~2 秒 |
+| 粗筛 | ~5 秒 |
+| AI 评审（Daytona 沙箱 + Claude） | ~2-4 分钟 |
+| 回填 | ~3 秒 |
+| **总计** | **~3-5 分钟** |
+
+---
+
 ## 下一步
 
-Phase 2-4 完成后，整个流水线已经在本地跑通。接下来是 **Phase 5（火山流水线上线）** 和 **Phase 6（飞书按钮对接）**——将本地手动执行变为"专家点按钮自动触发"的全自动流程。
+Phase 5 完成后，流水线已部署到火山引擎并可通过 Webhook 触发。接下来是 **Phase 6（飞书按钮对接）**——在飞书多维表格中配置「开始评审」按钮，点击后自动发送 HTTP 请求触发流水线，实现从"专家点按钮"到"结果自动回填"的全自动流程。
