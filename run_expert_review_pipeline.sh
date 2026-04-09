@@ -5,6 +5,7 @@
 
 set -euo pipefail
 
+PIPELINE_START=$(date +%s)
 echo "===== 专家考核评审流水线 ====="
 echo "开始时间: $(date '+%Y-%m-%d %H:%M:%S')"
 
@@ -18,14 +19,13 @@ echo "Record ID: $RECORD_ID"
 
 # ---------- 阶段 0: 检查环境 + 安装依赖 ----------
 echo ""
+STAGE_START=$(date +%s)
 echo "===== 阶段0: 环境准备 ====="
 python3 --version
-pwd
-ls -la
 
-echo "--- 安装依赖 ---"
-python3 -m pip install --user -U pip
-python3 -m pip install --user requests daytona-sdk
+echo "--- 检查依赖 ---"
+python3 -c "import requests; print('requests OK')" 2>/dev/null || { echo "安装 requests..."; pip install -q requests; }
+python3 -c "import daytona_sdk; print('daytona-sdk OK')" 2>/dev/null || python3 -c "import daytona; print('daytona OK')" 2>/dev/null || { echo "安装 daytona-sdk..."; pip install -q daytona-sdk; }
 
 # 确定脚本目录
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -34,8 +34,11 @@ echo "脚本目录: $SCRIPT_DIR"
 # 确保工作目录存在
 mkdir -p /workspace
 
+echo "阶段0 耗时: $(($(date +%s) - STAGE_START))s"
+
 # ---------- 阶段 1: 粗筛 ----------
 echo ""
+STAGE_START=$(date +%s)
 echo "===== 阶段1: 脚本粗筛 ====="
 
 set +e
@@ -63,8 +66,11 @@ case $PRE_EXIT in
         ;;
 esac
 
+echo "阶段1 耗时: $(($(date +%s) - STAGE_START))s"
+
 # ---------- 阶段 2: AI 评审 ----------
 echo ""
+STAGE_START=$(date +%s)
 echo "===== 阶段2: AI 评审 ====="
 
 set +e
@@ -78,8 +84,11 @@ if [ $AI_EXIT -ne 0 ]; then
     echo "警告: AI 评审失败 (exit=$AI_EXIT)，继续回填已有结果" >&2
 fi
 
+echo "阶段2 耗时: $(($(date +%s) - STAGE_START))s"
+
 # ---------- 阶段 3: 结果回填 ----------
 echo ""
+STAGE_START=$(date +%s)
 echo "===== 阶段3: 结果回填 ====="
 
 python3 "$SCRIPT_DIR/writeback.py" \
@@ -87,6 +96,9 @@ python3 "$SCRIPT_DIR/writeback.py" \
     --pre-screen-result /workspace/pre_screen_result.json \
     --ai-review-result /workspace/ai_review_result.json
 
+echo "阶段3 耗时: $(($(date +%s) - STAGE_START))s"
+
 echo ""
 echo "===== 流水线完成 ====="
+echo "总耗时: $(($(date +%s) - PIPELINE_START))s"
 echo "结束时间: $(date '+%Y-%m-%d %H:%M:%S')"

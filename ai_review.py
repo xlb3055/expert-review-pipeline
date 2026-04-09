@@ -63,7 +63,7 @@ OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 CLAUDE_MODEL = os.environ.get(
     "ANTHROPIC_MODEL",
-    os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "anthropic/claude-opus-4-6"),
+    os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "anthropic/claude-sonnet-4-6"),
 )
 
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "600"))
@@ -292,6 +292,7 @@ def run_ai_review(record_id: str) -> int:
         print("错误: OPENROUTER_API_KEY 未设置", file=sys.stderr)
         return 1
 
+    t0 = time.time()
     print("===== AI 评审开始 =====")
     print(f"Record ID: {record_id}")
     print(f"模型: {CLAUDE_MODEL}")
@@ -332,7 +333,7 @@ def run_ai_review(record_id: str) -> int:
         print(f"回填进行中状态失败（非致命）: {e}")
 
     # 6. 创建 Daytona Sandbox
-    print("\n--- 创建 Daytona Sandbox ---")
+    print(f"\n--- 创建 Daytona Sandbox --- [{time.time()-t0:.1f}s]")
     daytona = Daytona(DaytonaConfig(api_key=DAYTONA_API_KEY))
     sandbox_name = f"{SANDBOX_NAME_PREFIX}-{uuid.uuid4().hex[:6]}"
     print(f"沙箱名称: {sandbox_name}")
@@ -395,7 +396,7 @@ def run_ai_review(record_id: str) -> int:
         print(f"沙箱已创建: {sandbox.id}")
 
         # 6.5 安装 Claude Code CLI（若沙箱未预装）
-        print("\n--- 检查并安装 Claude Code CLI ---")
+        print(f"\n--- 检查并安装 Claude Code CLI --- [{time.time()-t0:.1f}s]")
         check_claude = sandbox.process.exec("which claude || echo 'NOT_FOUND'")
         if "NOT_FOUND" in (check_claude.result or ""):
             print("Claude Code CLI 未安装，正在安装...")
@@ -412,7 +413,7 @@ def run_ai_review(record_id: str) -> int:
             print(f"Claude Code CLI 已存在: {(check_claude.result or '').strip()}")
 
         # 7. 上传文件到沙箱
-        print("\n--- 上传文件到沙箱 ---")
+        print(f"\n--- 上传文件到沙箱 --- [{time.time()-t0:.1f}s]")
         sandbox.process.exec(f"mkdir -p {REMOTE_TMP_DIR}")
 
         prompt_remote = f"{REMOTE_TMP_DIR}/prompt_expert_review.md"
@@ -429,7 +430,7 @@ def run_ai_review(record_id: str) -> int:
         print("文件上传完成")
 
         # 8. 执行 Claude Code 命令
-        print("\n--- 执行 Claude Code ---")
+        print(f"\n--- 执行 Claude Code --- [{time.time()-t0:.1f}s]")
         claude_cmd = (
             f"cd {REMOTE_TMP_DIR} && "
             f"cat {input_remote} | claude -p "
@@ -515,7 +516,7 @@ def run_ai_review(record_id: str) -> int:
             print(f"标准错误:\n{stderr.strip()[:500]}")
 
         # 10. 下载并处理输出
-        print("\n--- 下载评审结果 ---")
+        print(f"\n--- 下载评审结果 --- [{time.time()-t0:.1f}s]")
         try:
             output_bytes = sandbox.fs.download_file(output_remote)
             claude_output = output_bytes.decode("utf-8").strip()
