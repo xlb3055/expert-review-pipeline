@@ -318,78 +318,255 @@ export BITABLE_TABLE_ID="tblxxxxx"        # Step 4 → 从 URL 提取
 
 ---
 
- **Phase 2：粗筛测试**                                             
+## Phase 2：粗筛测试
 
-​                               
+### 这一阶段在干什么
 
- **目标**：验证 pre_screen.py 的 6 项检查能正常跑通并回填结果到表格。                     
+验证 `pre_screen.py` 的 6 项硬性检查能正常运行，并将结果自动回填到飞书表格。粗筛是整个流水线的第一道关卡——快速过滤掉明显不合格的提交，避免浪费 AI 评审资源。
 
-​                               
+### 前置条件
 
- \- 用已有的测试行，执行 pre_screen.py --record-id recvgglWDZxZHZ
+- Phase 1 全部完成（飞书 API 读写正常）
+- 表格中有一行填好的测试数据（含 Trace 附件）
+- 本地安装了 `requests` 包
 
- \- 检查飞书表格的「粗筛状态」和「粗筛详情」是否正确更新
+### 6 项检查说明
 
- \- 再测几种失败场景（空描述、无 trace、轮次不足）确认拒绝逻辑正确
+| # | 检查项 | 通过条件 | 不通过处理 |
+|---|--------|---------|----------|
+| 1 | Trace 附件存在 | Trace 文件字段不为空 | 直接拒绝 |
+| 2 | 对话轮次 | trace 中用户消息 ≥ 5 轮 | 直接拒绝 |
+| 3 | SOTA 模型 | 使用 claude-opus 系列模型 | 无模型信息→待复核；非 opus→拒绝 |
+| 4 | 最终产物存在 | 链接或附件至少有一项 | 直接拒绝 |
+| 5 | 任务描述长度 | ≥ 100 字 | 直接拒绝 |
+| 6 | Trace 真实性 | 包含工具调用记录 | 标记待人工复核 |
 
+### 执行步骤
 
+```bash
+cd ~/Desktop/expert-review-pipeline
 
- **Phase** **3：AI** **评审测试**
+# 设置环境变量（同 Phase 1）
+export FEISHU_APP_ID="你的App ID"
+export FEISHU_APP_SECRET="你的App Secret"
+export BITABLE_APP_TOKEN="你的APP_TOKEN"
+export BITABLE_TABLE_ID="你的TABLE_ID"
 
+# 指定临时文件路径（本地测试用，生产环境用 /workspace/）
+export TRACE_OUTPUT_PATH="/tmp/expert_review_test/trace.jsonl"
+export PRE_SCREEN_RESULT_PATH="/tmp/expert_review_test/pre_screen_result.json"
 
+# 运行粗筛
+python3 pre_screen.py --record-id <你的record_id>
+```
 
- **目标**：验证 ai_review.py 能在 Daytona 沙箱中调 Claude 完成评分。
+### 退出码含义
 
+| 退出码 | 含义 | 流水线行为 |
+|--------|------|-----------|
+| 0 | 通过 | 继续到 AI 评审 |
+| 1 | 拒绝 | 流水线结束 |
+| 2 | 待人工复核 | 继续到 AI 评审 |
+| 3 | 系统错误 | 流水线报错 |
 
+### 验证
 
- \- 需要准备 DAYTONA_API_KEY 和 OPENROUTER_API_KEY
+1. 检查终端输出：每项检查会打印通过/不通过及详情
+2. 检查飞书表格：「粗筛状态」和「粗筛详情」字段应已更新
+3. 检查本地文件：`/tmp/expert_review_test/pre_screen_result.json` 包含完整检查结果
 
- \- 执行 ai_review.py --record-id recvgglWDZxZHZ
+### 测试失败场景
 
- \- 检查输出的评分 JSON 是否结构正确
+建议额外测试以下情况，确认拒绝逻辑正确：
 
+- 清空任务描述 → 应拒绝（检查 5）
+- 删除 Trace 附件 → 应拒绝（检查 1）
+- 使用对话轮次不足 5 轮的 trace → 应拒绝（检查 2）
 
+### 踩坑记录
 
- **Phase** **4：回填** **+** **端到端串联**
+**Trace 格式兼容**：Claude Code 的 transcript 日志中，用户消息的 type 可能是 `user`（而非 `human`），代码已做兼容。如果你的 trace 使用其他字段名，需要在 `trace_parser.py` 中适配。
 
+**模型信息缺失**：Claude Code transcript 不一定记录模型名，此时检查 3 会标记"待人工复核"而非直接拒绝。
 
+---
 
- **目标**：三个阶段串起来跑一遍完整流程。
+## Phase 3：AI 评审测试
 
+### 这一阶段在干什么
 
+在 Daytona 云沙箱中启动 Claude Code，让 AI 从 3 个维度对专家的考核产物进行评分。这是整个流水线的核心环节——用 AI 替代人工做专业判断。
 
- \- 执行 writeback.py 验证分数和结论正确回填
+### 为什么需要 Daytona 沙箱
 
- \- 用 run_expert_review_pipeline.sh 跑完整流程
+Claude Code CLI 需要访问 OpenRouter API，而国内网络环境可能无法直接访问。Daytona 沙箱位于海外，可以正常调用 API。流程是：
 
- \- 测试不同场景：正常通过、粗筛拒绝、AI 低分拒绝、边界待复核
+```
+本地脚本 → 创建海外沙箱 → 上传文件到沙箱 → 在沙箱中运行 Claude → 下载结果 → 销毁沙箱
+```
 
+### 前置条件
 
+- Phase 2 通过（trace 文件已下载到本地临时路径）
+- 两个额外的 API Key：
+  - `DAYTONA_API_KEY` — Daytona 平台的 API 密钥（在 [app.daytona.io](https://app.daytona.io) 获取）
+  - `OPENROUTER_API_KEY` — OpenRouter 的 API 密钥（在 [openrouter.ai](https://openrouter.ai) 获取）
+- 安装 Python 依赖：`pip install daytona-sdk requests`
 
- **Phase** **5：火山流水线上线**
+### 3 个评分维度
 
+| 维度 | 分值 | 评什么 |
+|------|------|--------|
+| 任务复杂度 | 0-3 | 专家选的任务本身难不难 |
+| 迭代质量 | 0-3 | 专家有没有主动引导/纠正 AI |
+| 专业判断 | 0-4 | 最终产出是否体现岗位专业性 |
+| **总分** | **0-10** | 三个维度之和 |
 
+### 执行步骤
 
- **目标**：代码不再本地跑，而是由火山引擎流水线自动执行。
+```bash
+cd ~/Desktop/expert-review-pipeline
 
+# Phase 1 的环境变量 + 新增两个 Key
+export FEISHU_APP_ID="你的App ID"
+export FEISHU_APP_SECRET="你的App Secret"
+export BITABLE_APP_TOKEN="你的APP_TOKEN"
+export BITABLE_TABLE_ID="你的TABLE_ID"
+export DAYTONA_API_KEY="你的Daytona Key"
+export OPENROUTER_API_KEY="你的OpenRouter Key"
 
+# 临时文件路径
+export TRACE_OUTPUT_PATH="/tmp/expert_review_test/trace.jsonl"
+export AI_REVIEW_RESULT_PATH="/tmp/expert_review_test/ai_review_result.json"
+export CLAUDE_TIMEOUT="600"
 
- \- 在火山引擎创建流水线 + 配置代码源（GitHub）
+# 使用 venv（daytona-sdk 装在 venv 里）
+.venv/bin/python3 ai_review.py --record-id <你的record_id>
+```
 
- \- 配置 Webhook 触发器 + 环境变量（密钥）
+### 执行过程说明
 
- \- 配置执行任务（调用 run_expert_review_pipeline.sh）
+脚本会依次完成以下步骤（总耗时约 1-3 分钟）：
 
+1. **获取飞书记录** — 读取任务描述、专家信息等
+2. **读取 Trace 内容** — 从本地临时路径读取（由 pre_screen.py 已下载）
+3. **组装输入文本** — 将专家信息 + 任务描述 + trace 内容拼成一份供 Claude 阅读的文本
+4. **创建 Daytona 沙箱** — 在海外创建一个临时计算环境
+5. **检查/安装 Claude CLI** — 若沙箱未预装 Claude Code，自动 `npm install`
+6. **上传文件** — 将 prompt、schema、输入文本上传到沙箱
+7. **执行 Claude Code** — 在沙箱中运行 `claude -p` 命令
+8. **轮询等待** — 每 5 秒检查一次是否完成
+9. **下载结果** — 取回评审 JSON
+10. **清理沙箱** — 停止并删除沙箱
 
+### 验证
 
- **Phase** **6：飞书按钮对接**
+1. 检查终端输出：应看到 `沙箱已创建`、`文件上传完成`、`exit_code=0`、`已下载 xxx 字符`
+2. 检查结果文件：`/tmp/expert_review_test/ai_review_result.json` 应包含 3 个维度的评分
+3. 检查评分合理性：分数应与 trace 内容匹配（简单操作低分，复杂操作高分）
 
+### 踩坑记录
 
+**代理干扰**：本地若有 SOCKS 代理（`ALL_PROXY`、`HTTP_PROXY`），会导致 Daytona SDK 的文件上传失败。运行前先 `unset HTTP_PROXY HTTPS_PROXY ALL_PROXY`。
 
- **目标**：专家点「开始评审」按钮就能触发整个流水线。
+**Snapshot 名称**：默认使用 `daytona-medium`（2 CPU / 4 GB）。如果你的 Daytona 账户有自定义 snapshot（如公司的 `claude-code-snapshot`），可通过 `SNAPSHOT_NAME` 环境变量指定。
 
+**daytona-sdk 包名变更**：新版 SDK 的 import 路径是 `daytona_sdk`（不是 `daytona`），代码已做兼容。
 
+**输出格式提取**：Claude 返回的 JSON 可能有多层包装（API 包装 → markdown 代码块 → 非标准键名），代码会自动处理这些情况。
 
- \- 在飞书多维表格配置按钮的 HTTP 请求，连接火山流水线的 Webhook URL
+---
 
- \- 端到端测试：填数据 → 点按钮 → 自动审核 → 结果回填
+## Phase 4：回填 + 端到端串联
+
+### 这一阶段在干什么
+
+将粗筛和 AI 评审的结果汇总，计算最终结论，一次性回填到飞书表格的所有结果字段。然后用入口脚本串联三个阶段跑一次完整流程。
+
+### 结论判定规则
+
+| 总分 | 最终结论 |
+|------|---------|
+| ≥ 7 分 | 通过 |
+| 5-6 分 | 待人工复核 |
+| < 5 分 | 拒绝 |
+
+如果粗筛已拒绝，则最终结论直接为"拒绝"，不看 AI 评分。
+
+### Step 1：单独测试 writeback.py
+
+```bash
+cd ~/Desktop/expert-review-pipeline
+
+export FEISHU_APP_ID="你的App ID"
+export FEISHU_APP_SECRET="你的App Secret"
+export BITABLE_APP_TOKEN="你的APP_TOKEN"
+export BITABLE_TABLE_ID="你的TABLE_ID"
+
+python3 writeback.py \
+  --record-id <你的record_id> \
+  --pre-screen-result /tmp/expert_review_test/pre_screen_result.json \
+  --ai-review-result /tmp/expert_review_test/ai_review_result.json
+```
+
+验证：飞书表格中以下字段应已更新：
+- `AI评审状态` — 通过/拒绝/待人工复核
+- `AI评审结果` — 完整 JSON
+- `任务复杂度` / `迭代质量` / `专业判断` — 各维度分数
+- `总分` — 公式自动计算
+- `最终结论` — 通过/拒绝/待人工复核
+
+### Step 2：用入口脚本跑完整流程
+
+入口脚本 `run_expert_review_pipeline.sh` 按顺序调用三个阶段：
+
+```bash
+cd ~/Desktop/expert-review-pipeline
+
+# 设置全部环境变量
+export FEISHU_APP_ID="你的App ID"
+export FEISHU_APP_SECRET="你的App Secret"
+export BITABLE_APP_TOKEN="你的APP_TOKEN"
+export BITABLE_TABLE_ID="你的TABLE_ID"
+export DAYTONA_API_KEY="你的Daytona Key"
+export OPENROUTER_API_KEY="你的OpenRouter Key"
+export RECORD_ID="<你的record_id>"
+
+bash run_expert_review_pipeline.sh
+```
+
+脚本会自动执行：
+1. **阶段 1 粗筛** → 退出码 0/2 继续，退出码 1 结束
+2. **阶段 2 AI 评审** → 即使失败也继续到回填
+3. **阶段 3 回填** → 将所有结果写入飞书
+
+### Step 3：测试不同场景
+
+| 场景 | 预期结果 |
+|------|---------|
+| 正常提交（高质量 trace） | 粗筛通过 → AI 评高分 → 最终通过 |
+| 缺少 Trace | 粗筛拒绝 → 流水线结束 |
+| 任务描述太短 | 粗筛拒绝 → 流水线结束 |
+| 简单操作的 trace | 粗筛通过 → AI 评低分 → 最终拒绝 |
+| 中等质量 | 粗筛通过 → AI 评 5-6 分 → 待人工复核 |
+
+### 回填的完整字段列表
+
+writeback.py 一次性回填以下 6 个字段：
+
+```
+AI评审状态     ← 通过/拒绝/待人工复核
+AI评审结果     ← 完整的 AI 评审 JSON
+任务复杂度     ← 0-3 分
+迭代质量       ← 0-3 分
+专业判断       ← 0-4 分
+最终结论       ← 通过/拒绝/待人工复核
+```
+
+`总分` 是公式字段（`任务复杂度 + 迭代质量 + 专业判断`），飞书自动计算，不需要回填。
+
+---
+
+## 下一步
+
+Phase 2-4 完成后，整个流水线已经在本地跑通。接下来是 **Phase 5（火山流水线上线）** 和 **Phase 6（飞书按钮对接）**——将本地手动执行变为"专家点按钮自动触发"的全自动流程。
