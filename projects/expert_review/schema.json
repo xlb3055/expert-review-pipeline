@@ -1,0 +1,200 @@
+{
+  "name": "expert_review_result",
+  "description": "专家考核产物评审输出结构：专家能力分（0-10）+ Trace 资产分（0-12）",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "expert_ability": {
+        "type": "object",
+        "description": "模块A：专家能力分（0-10）",
+        "properties": {
+          "task_complexity": {
+            "type": "object",
+            "description": "任务复杂度 (0-3)",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "description": "分数 (0-3)",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "evidence": {
+                "type": "string",
+                "description": "评分证据，引用 trace 或任务描述中的具体内容，中文"
+              }
+            },
+            "required": ["score", "evidence"]
+          },
+          "iteration_quality": {
+            "type": "object",
+            "description": "迭代质量 (0-3)",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "description": "分数 (0-3)",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "evidence": {
+                "type": "string",
+                "description": "评分证据，引用 trace 中专家的交互行为，中文"
+              }
+            },
+            "required": ["score", "evidence"]
+          },
+          "professional_judgment": {
+            "type": "object",
+            "description": "专业判断 (0-4)",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "description": "分数 (0-4)",
+                "minimum": 0,
+                "maximum": 4
+              },
+              "evidence": {
+                "type": "string",
+                "description": "评分证据，说明产出如何体现专业性，中文"
+              }
+            },
+            "required": ["score", "evidence"]
+          },
+          "total": {
+            "type": "integer",
+            "description": "专家能力总分 (0-10)，为三个维度分数之和",
+            "minimum": 0,
+            "maximum": 10
+          }
+        },
+        "required": ["task_complexity", "iteration_quality", "professional_judgment", "total"]
+      },
+      "trace_asset": {
+        "type": "object",
+        "description": "模块B：Trace 资产分（0-12）",
+        "properties": {
+          "authenticity": {
+            "type": "object",
+            "description": "真实性 (0-2)",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "description": "分数 (0-2)",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "evidence": {
+                "type": "string",
+                "description": "评分证据，中文"
+              }
+            },
+            "required": ["score", "evidence"]
+          },
+          "info_density": {
+            "type": "object",
+            "description": "信息密度 (0-2)",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "description": "分数 (0-2)",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "evidence": {
+                "type": "string",
+                "description": "评分证据，中文"
+              }
+            },
+            "required": ["score", "evidence"]
+          },
+          "tool_loop": {
+            "type": "object",
+            "description": "工具闭环 (0-2)",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "description": "分数 (0-2)",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "evidence": {
+                "type": "string",
+                "description": "评分证据，中文"
+              }
+            },
+            "required": ["score", "evidence"]
+          },
+          "correction_value": {
+            "type": "object",
+            "description": "纠偏价值 (0-2)",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "description": "分数 (0-2)",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "evidence": {
+                "type": "string",
+                "description": "评分证据，中文"
+              }
+            },
+            "required": ["score", "evidence"]
+          },
+          "verification_loop": {
+            "type": "object",
+            "description": "验证闭环 (0-2)",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "description": "分数 (0-2)",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "evidence": {
+                "type": "string",
+                "description": "评分证据，中文"
+              }
+            },
+            "required": ["score", "evidence"]
+          },
+          "compliance": {
+            "type": "object",
+            "description": "合规可用性 (0-2)",
+            "properties": {
+              "score": {
+                "type": "integer",
+                "description": "分数 (0-2)",
+                "minimum": 0,
+                "maximum": 2
+              },
+              "evidence": {
+                "type": "string",
+                "description": "评分证据，中文"
+              }
+            },
+            "required": ["score", "evidence"]
+          },
+          "total": {
+            "type": "integer",
+            "description": "Trace 资产总分 (0-12)，为六个维度分数之和",
+            "minimum": 0,
+            "maximum": 12
+          }
+        },
+        "required": ["authenticity", "info_density", "tool_loop", "correction_value", "verification_loop", "compliance", "total"]
+      },
+      "overall_assessment": {
+        "type": "string",
+        "description": "整体评估，2-5 句话中文概括"
+      },
+      "trace_highlights": {
+        "type": "array",
+        "description": "Trace 亮点，1-3 个值得关注的交互片段描述",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "required": ["expert_ability", "trace_asset", "overall_assessment", "trace_highlights"]
+  }
+}

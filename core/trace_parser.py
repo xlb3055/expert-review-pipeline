@@ -69,32 +69,42 @@ def parse_trace_file(filepath: str) -> TraceAnalysis:
 
         entry_type = entry.get("type", "")
 
+        # 兼容两种 trace 格式：
+        # 格式A（旧）: entry.content / entry.model（顶层）
+        # 格式B（新 Claude Code session）: entry.message.content / entry.message.model
+        message = entry.get("message", {}) if isinstance(entry.get("message"), dict) else {}
+
         # 统计用户消息轮次（兼容 "human" 和 "user" 两种格式）
         if entry_type in ("human", "user"):
-            analysis.conversation_rounds += 1
+            # 排除 isMeta 标记的系统消息
+            if not entry.get("isMeta", False):
+                analysis.conversation_rounds += 1
 
-        # 提取模型名（从 assistant 消息，或从任意含 model 字段的记录）
+        # 提取模型名（从 assistant 消息）
         if entry_type == "assistant":
-            model = entry.get("model", "")
+            model = entry.get("model", "") or message.get("model", "")
             if model:
                 models_seen.add(model)
         # 兼容：某些 trace 格式在其他类型的记录中也有 model 字段
         if "model" in entry and entry["model"]:
             models_seen.add(entry["model"])
+        if "model" in message and message["model"]:
+            models_seen.add(message["model"])
 
         # 检测工具调用
         if entry_type == "tool_use":
             analysis.has_tool_calls = True
             analysis.tool_call_count += 1
 
-        # 也检查 assistant 消息中内嵌的 tool_use content 块
+        # 检查 assistant 消息中内嵌的 tool_use content 块
+        # 兼容格式A（entry.content）和格式B（entry.message.content）
         if entry_type == "assistant":
-            content = entry.get("content", [])
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "tool_use":
-                        analysis.has_tool_calls = True
-                        analysis.tool_call_count += 1
+            for content_source in (entry.get("content", []), message.get("content", [])):
+                if isinstance(content_source, list):
+                    for block in content_source:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            analysis.has_tool_calls = True
+                            analysis.tool_call_count += 1
 
         # 检查 tool_result 类型（证明确实执行了工具）
         if entry_type == "tool_result":
@@ -146,8 +156,9 @@ def truncate_trace_content(filepath: str, max_rounds: int = 50, max_bytes: int =
         except json.JSONDecodeError:
             continue
 
-        if isinstance(entry, dict) and entry.get("type") == "human":
-            human_count += 1
+        if isinstance(entry, dict) and entry.get("type") in ("human", "user"):
+            if not entry.get("isMeta", False):
+                human_count += 1
 
         if human_count > max_rounds:
             kept_lines.append(f'[... 已截断，共 {len(lines)} 行，仅保留前 {max_rounds} 轮对话 ...]')
@@ -167,7 +178,7 @@ def truncate_trace_content(filepath: str, max_rounds: int = 50, max_bytes: int =
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("用法: python3 trace_parser.py <trace.jsonl>")
+        print("用法: python3 -m core.trace_parser <trace.jsonl>")
         sys.exit(1)
 
     result = parse_trace_file(sys.argv[1])

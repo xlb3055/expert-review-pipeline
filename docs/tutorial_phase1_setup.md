@@ -1,8 +1,104 @@
-# 专家考核产物自动审核流水线 —Phase 1：基础搭建教程
+```mermaid
+flowchart TB
+  classDef action fill:#f7f9fc,stroke:#6b7280,color:#111827;
+  classDef decision fill:#fff7ed,stroke:#f59e0b,color:#7c2d12;
+  classDef output fill:#ecfdf3,stroke:#16a34a,color:#14532d;
+  classDef risk fill:#fef2f2,stroke:#ef4444,color:#7f1d1d;
 
-## 前言
+  start([开始：按教程搭建示例]):::output
 
-本教程覆盖从零开始搭建流水线的前两个阶段：代码准备和飞书基础设施配通。完成本教程后，你的代码将能正常读写飞书多维表格，为后续的粗筛、AI 评审打好基础。
+  subgraph ph1["Phase 1 基础搭建（目的：本地脚本可读写飞书）"]
+    p1_1["Step1 代码入库<br/>作用：准备 8 个核心文件并推送 GitHub"]:::action
+    p1_2["Step2 建飞书多维表格（20 字段）<br/>作用：作为流水线数据库"]:::action
+    p1_3["Step3 建飞书应用 + 配权限 + 发布 + 加表格协作者<br/>作用：拿到可用身份与写权限"]:::action
+    p1_4["Step4 提取 APP_TOKEN / TABLE_ID<br/>作用：定位具体表"]:::action
+    p1_5["Step5 填测试数据 + Trace + record_id<br/>作用：准备首条可审记录"]:::action
+    p1_6["Step6 API 连通性测试（读 + 写）<br/>作用：确认凭证、权限、字段名都正确"]:::action
+    p1_ok{"读写都成功?"}:::decision
+    p1_fix["排查：App 凭证/协作者权限/字段名/record_id"]:::risk
+    p1_out["产出：4 个基础环境变量 + 可操作 record_id"]:::output
+    p1_1 --> p1_2 --> p1_3 --> p1_4 --> p1_5 --> p1_6 --> p1_ok
+    p1_ok -- 否 --> p1_fix --> p1_6
+    p1_ok -- 是 --> p1_out
+  end
+
+  subgraph ph2["Phase 2 粗筛测试（目的：过滤明显不合格提交）"]
+    p2_1["运行 pre_screen.py"]:::action
+    p2_2["执行 6 项硬检查<br/>Trace存在/轮次>=5/模型/产物/描述长度/工具调用"]:::action
+    p2_d{"退出码?"}:::decision
+    p2_0["0=通过：继续 AI 评审"]:::output
+    p2_1r["1=拒绝：结束本记录"]:::risk
+    p2_2r["2=待复核：标记后继续 AI 评审"]:::output
+    p2_3r["3=系统错误：修复后重跑"]:::risk
+    p2_out["产出：粗筛状态 + 粗筛详情回填"]:::output
+    p2_1 --> p2_2 --> p2_d
+    p2_d -- 0 --> p2_0 --> p2_out
+    p2_d -- 1 --> p2_1r
+    p2_d -- 2 --> p2_2r --> p2_out
+    p2_d -- 3 --> p2_3r
+  end
+
+  subgraph ph3["Phase 3 AI 评审测试（目的：自动专业评分）"]
+    p3_1["补充 Key：DAYTONA_API_KEY + OPENROUTER_API_KEY"]:::action
+    p3_2["运行 ai_review.py"]:::action
+    p3_3["Daytona 流程：建沙箱 -> 上传文件 -> 运行 Claude -> 轮询 -> 下载结果 -> 清理"]:::action
+    p3_4["评分维度：任务复杂度(0-3) + 迭代质量(0-3) + 专业判断(0-4)"]:::action
+    p3_out["产出：ai_review_result.json + 三维度分数"]:::output
+    p3_1 --> p3_2 --> p3_3 --> p3_4 --> p3_out
+  end
+
+  subgraph ph4["Phase 4 回填与端到端串联（目的：形成闭环）"]
+    p4_1["先单测 writeback.py"]:::action
+    p4_2["再跑 run_expert_review_pipeline.sh<br/>顺序：粗筛 -> AI评审 -> 回填"]:::action
+    p4_3["结论规则：粗筛拒绝=>最终拒绝；否则按总分 >=7 通过 / 5-6 待复核 / <5 拒绝"]:::action
+    p4_out["产出：AI状态、各维分、最终结论等字段回填"]:::output
+    p4_1 --> p4_2 --> p4_3 --> p4_out
+  end
+
+  subgraph ph5["Phase 5 火山引擎上线（目的：服务化自动触发）"]
+    p5_1["建流水线（空白模板）"]:::action
+    p5_2["配 GitHub 代码源（HTTPS）"]:::action
+    p5_3["构建并推送自定义镜像（预装 requests/daytona-sdk）"]:::action
+    p5_4["配 Webhook 触发器并保存 URL"]:::action
+    p5_5["配 7 个变量并打开“环境变量”注入开关"]:::action
+    p5_6["命令节点：cd /workspace && bash run_expert_review_pipeline.sh"]:::action
+    p5_7["手动运行 + curl 测 Webhook"]:::action
+    p5_ok{"两种触发都成功?"}:::decision
+    p5_fix["排查：仓库可见性/镜像地址/变量注入/record_id映射"]:::risk
+    p5_out["产出：可被 Webhook 稳定触发的线上流水线"]:::output
+    p5_1 --> p5_2 --> p5_3 --> p5_4 --> p5_5 --> p5_6 --> p5_7 --> p5_ok
+    p5_ok -- 否 --> p5_fix --> p5_7
+    p5_ok -- 是 --> p5_out
+  end
+
+  subgraph ph6["Phase 6 飞书按钮对接（目的：专家一键触发审核）"]
+    p6_1["建飞书自动化：触发器=点击“开始评审”按钮"]:::action
+    p6_2["动作=发送 HTTP POST 到火山 Webhook"]:::action
+    p6_3["请求体带当前行 record_id；火山侧映射到 RECORD_ID"]:::action
+    p6_4["关联按钮字段并启用自动化"]:::action
+    p6_5["端到端测试：点击按钮后等待 3-5 分钟"]:::action
+    p6_ok{"结果字段自动更新?"}:::decision
+    p6_fix["排查：JSON格式/按钮关联/触发器映射/流水线日志"]:::risk
+    done([完成：飞书按钮 -> 自动审核 -> 结果回表闭环]):::output
+    p6_1 --> p6_2 --> p6_3 --> p6_4 --> p6_5 --> p6_ok
+    p6_ok -- 否 --> p6_fix --> p6_5
+    p6_ok -- 是 --> done
+  end
+
+  start --> p1_1
+  p1_out --> p2_1
+  p2_out --> p3_1
+  p3_out --> p4_1
+  p4_out --> p5_1
+  p5_out --> p6_1
+
+```
+
+
+
+# 专家考核产物自动审核流水线 
+
+## Phase 1：基础搭建教程
 
 ---
 

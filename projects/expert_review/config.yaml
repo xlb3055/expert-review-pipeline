@@ -1,0 +1,94 @@
+project:
+  name: expert_review
+  description: "专家考核产物自动审核"
+
+feishu:
+  app_token: ""   # 留空 = 使用环境变量
+  table_id: ""
+
+stages:
+  - name: pre_screen
+    script: pre_screen.py
+    description: "脚本粗筛"
+    exit_code_handling:
+      0: continue
+      1: stop
+      2: continue
+  - name: ai_review
+    script: ai_review.py
+    description: "AI 评审"
+    exit_code_handling:
+      0: continue
+      1: continue   # 失败不致命
+  - name: writeback
+    script: writeback.py
+    description: "结果回填"
+    exit_code_handling:
+      0: continue
+
+ai_review:
+  prompt_file: prompt.md
+  schema_file: schema.json
+  model: ""
+  timeout: 600
+  sandbox_snapshot: "daytona-medium"
+  sandbox_resources:
+    cpu: 2
+    memory: 4
+    disk: 5
+
+scoring:
+  expert_ability:
+    pass_threshold: 7
+    dimensions:
+      - { key: task_complexity, max_score: 3 }
+      - { key: iteration_quality, max_score: 3 }
+      - { key: professional_judgment, max_score: 4 }
+  trace_asset:
+    high_value_threshold: 9
+    dimensions:
+      - { key: authenticity, max_score: 2 }
+      - { key: info_density, max_score: 2 }
+      - { key: tool_loop, max_score: 2 }
+      - { key: correction_value, max_score: 2 }
+      - { key: verification_loop, max_score: 2 }
+      - { key: compliance, max_score: 2 }
+
+field_mapping:
+  # 输入字段（不变）
+  trace_file: "Trace文件"
+  task_description: "任务描述"
+  expert_name: "专家姓名"
+  expert_id: "专家ID"
+  position: "岗位方向"
+  final_product: "最终产物"
+  final_attachment: "最终附件"
+  # 输出字段
+  pre_screen_status: "粗筛状态"
+  pre_screen_detail: "粗筛详情"
+  ai_review_status: "AI评审状态"
+  ai_review_result: "AI评审结果"
+  # 专家能力分
+  task_complexity_score: "任务复杂度"
+  iteration_quality_score: "迭代质量"
+  professional_judgment_score: "专业判断"
+  expert_ability_total: "总分"
+  # Trace 资产分（新增字段）
+  trace_asset_total: "Trace资产总分"
+  authenticity_score: "真实性"
+  info_density_score: "信息密度"
+  tool_loop_score: "工具闭环"
+  correction_value_score: "纠偏价值"
+  verification_loop_score: "验证闭环"
+  compliance_score: "合规可用性"
+  # 最终结论
+  final_conclusion: "最终结论"
+
+pre_screen:
+  min_conversation_rounds: 3
+  min_task_description_length: 50
+
+workspace:
+  trace_path: "/workspace/trace.jsonl"
+  pre_screen_result_path: "/workspace/pre_screen_result.json"
+  ai_review_result_path: "/workspace/ai_review_result.json"
