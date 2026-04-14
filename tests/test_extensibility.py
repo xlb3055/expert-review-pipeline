@@ -111,12 +111,12 @@ class TestExtensibility(unittest.TestCase):
         """两个项目的 FeishuClient 不互相污染"""
         from core.feishu_utils import FeishuClient
 
-        client_a = FeishuClient("id_a", "secret_a", "token_a", "table_a")
-        client_b = FeishuClient("id_b", "secret_b", "token_b", "table_b")
+        client_a = FeishuClient("id_a", "secret_a")
+        client_b = FeishuClient("id_b", "secret_b")
 
-        self.assertEqual(client_a.app_token, "token_a")
-        self.assertEqual(client_b.app_token, "token_b")
-        self.assertNotEqual(client_a.table_id, client_b.table_id)
+        self.assertEqual(client_a.app_id, "id_a")
+        self.assertEqual(client_b.app_id, "id_b")
+        self.assertNotEqual(client_a.app_secret, client_b.app_secret)
 
     def test_new_project_pipeline_runs(self):
         """新项目只有 1 个 stage，pipeline_runner 能正确执行"""

@@ -4,7 +4,7 @@
 """
 飞书多维表格 API 工具
 
-FeishuClient 类：操作主表（读数据 + 回填审核状态）。
+FeishuClient 类：只管认证，不绑定特定表。调用方传 app_token + table_id。
 无状态工具函数：normalize_field_value / extract_attachment_file_token / extract_link_url。
 """
 
@@ -17,14 +17,11 @@ import requests
 # ========== FeishuClient 类 ==========
 
 class FeishuClient:
-    """飞书多维表格客户端，封装 token 获取和主表记录读写。"""
+    """飞书多维表格客户端，只管认证，不绑定特定表。"""
 
-    def __init__(self, app_id: str, app_secret: str,
-                 main_app_token: str, main_table_id: str):
+    def __init__(self, app_id: str, app_secret: str):
         self.app_id = app_id
         self.app_secret = app_secret
-        self.main_app_token = main_app_token
-        self.main_table_id = main_table_id
         self._token = ""
 
     @classmethod
@@ -34,8 +31,6 @@ class FeishuClient:
         return cls(
             app_id=feishu["app_id"],
             app_secret=feishu["app_secret"],
-            main_app_token=feishu.get("main_app_token", ""),
-            main_table_id=feishu.get("main_table_id", ""),
         )
 
     def get_token(self) -> str:
@@ -55,14 +50,14 @@ class FeishuClient:
         self._token = data["tenant_access_token"]
         return self._token
 
-    # ========== 主表操作 ==========
+    # ========== 通用记录操作 ==========
 
-    def get_main_record(self, record_id: str) -> dict:
-        """获取主表单条记录。"""
+    def get_record(self, app_token: str, table_id: str, record_id: str) -> dict:
+        """获取单条记录。"""
         token = self.get_token()
         url = (
-            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.main_app_token}"
-            f"/tables/{self.main_table_id}/records/{record_id}"
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/{record_id}"
         )
         headers = {
             "Authorization": f"Bearer {token}",
@@ -75,12 +70,13 @@ class FeishuClient:
             raise RuntimeError(f"获取飞书记录失败: {data}")
         return data.get("data", {}).get("record", {})
 
-    def update_main_record(self, record_id: str, fields: dict) -> dict:
-        """更新主表指定记录的字段（回填审核状态等）。"""
+    def update_record(self, app_token: str, table_id: str,
+                      record_id: str, fields: dict) -> dict:
+        """更新指定记录的字段。"""
         token = self.get_token()
         url = (
-            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.main_app_token}"
-            f"/tables/{self.main_table_id}/records/{record_id}"
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/{record_id}"
         )
         headers = {
             "Authorization": f"Bearer {token}",
@@ -92,6 +88,25 @@ class FeishuClient:
         data = resp.json()
         if data.get("code") != 0:
             raise RuntimeError(f"更新飞书记录失败: {data}")
+        return data
+
+    def create_record(self, app_token: str, table_id: str, fields: dict) -> dict:
+        """在指定表中创建一条新记录。"""
+        token = self.get_token()
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"fields": fields}
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"创建飞书记录失败: {data}")
         return data
 
     # ========== 附件下载 ==========

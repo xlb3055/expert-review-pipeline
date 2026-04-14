@@ -24,7 +24,7 @@ import sys
 import time
 from pathlib import Path
 
-from core.config_loader import load_project_config, get_main_field_name
+from core.config_loader import load_project_config, get_field_name
 from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
@@ -38,7 +38,7 @@ from core.trace_extractor import extract_user_focused_content
 
 def _build_input_text(fields: dict, trace_content: str, config: dict) -> str:
     """组装 AI 评审的输入文本（使用主表字段映射）。"""
-    mfm = config.get("main_field_mapping", {})
+    mfm = config.get("field_mapping", {})
 
     task_desc = normalize_field_value(fields.get(mfm.get("task_description", "任务说明"), ""))
     expert_name = normalize_field_value(fields.get(mfm.get("expert_name", "提交人"), ""))
@@ -90,6 +90,9 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     """
     config = load_project_config(project_dir)
     client = FeishuClient.from_config(config)
+    feishu = config["feishu"]
+    app_token = feishu["app_token"]
+    table_id = feishu["table_id"]
     ai_cfg = config.get("ai_review", {})
     workspace = config.get("workspace", {})
 
@@ -126,13 +129,13 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
 
     # 1. 从主表获取记录
     print("\n--- 从主表获取记录 ---")
-    record = client.get_main_record(record_id)
+    record = client.get_record(app_token, table_id, record_id)
     fields = record.get("fields", {})
 
     # 2. 如果 Trace 文件不存在（pre_screen 已下载），需要重新下载
     if not os.path.exists(trace_input_path):
         print("\n--- Trace 文件不存在，重新下载 ---")
-        trace_field_name = get_main_field_name(config, "trace_file")
+        trace_field_name = get_field_name(config, "trace_file")
         trace_field = fields.get(trace_field_name)
         file_token = extract_attachment_file_token(trace_field)
         if file_token:

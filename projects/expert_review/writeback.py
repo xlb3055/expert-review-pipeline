@@ -128,7 +128,10 @@ def run_writeback(record_id: str, project_dir: str) -> int:
     """
     config = load_project_config(project_dir)
     client = FeishuClient.from_config(config)
-    mfm = config.get("main_field_mapping", {})
+    feishu = config["feishu"]
+    app_token = feishu["app_token"]
+    table_id = feishu["table_id"]
+    mfm = config.get("field_mapping", {})
     scoring = config.get("scoring", {})
     workspace = config.get("workspace", {})
     conclusion_map = config.get("conclusion_to_status", {})
@@ -209,7 +212,7 @@ def run_writeback(record_id: str, project_dir: str) -> int:
     machine_note_field = mfm.get("machine_review_note", "机审说明")
 
     try:
-        client.update_main_record(record_id, {
+        client.update_record(app_token, table_id, record_id, {
             review_status_field: main_status,
             machine_note_field: machine_note,
         })

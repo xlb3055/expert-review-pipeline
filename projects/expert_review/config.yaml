@@ -3,12 +3,12 @@ project:
   description: "专家考核产物自动审核"
 
 feishu:
-  # 主表 — 数据源 + 最终回填
-  main_app_token: "TdiNb881Ja89b9s6FwNcOH1Vn4c"
-  main_table_id: "tblE2Qdot3No2kUC"
   # 凭证（从环境变量读取）
   app_id: ""
   app_secret: ""
+  # 主表 — 数据源 + 最终回填
+  app_token: "TdiNb881Ja89b9s6FwNcOH1Vn4c"
+  table_id: "tblE2Qdot3No2kUC"
 
 stages:
   - name: pre_screen
@@ -58,8 +58,8 @@ scoring:
       - { key: verification_loop, max_score: 2 }
       - { key: compliance, max_score: 2 }
 
-# 主表字段映射（主表字段名 → 逻辑名）
-main_field_mapping:
+# 字段映射（逻辑名 → 实际飞书字段名）
+field_mapping:
   task_description: "任务说明"
   trace_file: "Trace 文件"
   expert_name: "提交人"         # 主表是 person 类型

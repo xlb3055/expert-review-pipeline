@@ -29,7 +29,7 @@ import os
 import re
 import sys
 
-from core.config_loader import load_project_config, get_main_field_name
+from core.config_loader import load_project_config, get_field_name
 from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
@@ -258,7 +258,9 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     """
     config = load_project_config(project_dir)
     client = FeishuClient.from_config(config)
-    mfm = config.get("main_field_mapping", {})
+    feishu = config["feishu"]
+    app_token = feishu["app_token"]
+    table_id = feishu["table_id"]
     pre_cfg = config.get("pre_screen", {})
     workspace = config.get("workspace", {})
 
@@ -277,19 +279,19 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
 
     # 1. 从主表获取记录
     print("\n--- 从主表获取记录 ---")
-    record = client.get_main_record(record_id)
+    record = client.get_record(app_token, table_id, record_id)
     fields = record.get("fields", {})
 
     results = []
 
     # 检查 1: 任务真实性
-    desc_field = get_main_field_name(config, "task_description")
+    desc_field = get_field_name(config, "task_description")
     check1 = check_task_authenticity(fields, desc_field)
     results.append(check1)
     print(f"[检查1] task_authenticity: {'通过' if check1['passed'] else '不通过'} — {check1['detail']}")
 
     # 下载 Trace 附件
-    trace_field_name = get_main_field_name(config, "trace_file")
+    trace_field_name = get_field_name(config, "trace_file")
     trace_field = fields.get(trace_field_name)
     file_token = extract_attachment_file_token(trace_field)
     trace = TraceAnalysis()
@@ -317,7 +319,7 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
                 "detail": f"Trace 下载失败: {e}",
                 "action": "reject",
             })
-            return _finalize(client, record_id, results, "拒绝", result_path, config)
+            return _finalize(client, app_token, table_id, record_id, results, "拒绝", result_path, config)
 
     # 检查 2: Trace 完整性
     check2 = check_trace_integrity(fields, trace_field_name, trace, min_rounds)
@@ -330,7 +332,7 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     print(f"[检查3] tool_loop_exists: {'通过' if check3['passed'] else '不通过'} — {check3['detail']}")
 
     # 检查 4: 最终产物
-    product_field = get_main_field_name(config, "final_product")
+    product_field = get_field_name(config, "final_product")
     check4 = check_final_product_exists(fields, product_field)
     results.append(check4)
     print(f"[检查4] final_product_exists: {'通过' if check4['passed'] else '不通过'} — {check4['detail']}")
@@ -361,17 +363,18 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     manual_review = [r for r in results if not r["passed"] and r.get("action") == "manual_review"]
 
     if rejected:
-        return _finalize(client, record_id, results, "拒绝", result_path, config)
+        return _finalize(client, app_token, table_id, record_id, results, "拒绝", result_path, config)
     elif manual_review:
-        return _finalize(client, record_id, results, "待人工复核", result_path, config)
+        return _finalize(client, app_token, table_id, record_id, results, "待人工复核", result_path, config)
     else:
-        return _finalize(client, record_id, results, "通过", result_path, config)
+        return _finalize(client, app_token, table_id, record_id, results, "通过", result_path, config)
 
 
-def _finalize(client: FeishuClient, record_id: str, results: list, status: str,
+def _finalize(client: FeishuClient, app_token: str, table_id: str,
+              record_id: str, results: list, status: str,
               result_path: str, config: dict) -> int:
     """汇总结果、主表回填、保存本地 JSON、返回退出码。"""
-    mfm = config.get("main_field_mapping", {})
+    mfm = config.get("field_mapping", {})
     conclusion_map = config.get("conclusion_to_status", {})
 
     result_obj = {
@@ -398,7 +401,7 @@ def _finalize(client: FeishuClient, record_id: str, results: list, status: str,
         reject_reasons = [r["detail"] for r in results if not r["passed"] and r.get("action") == "reject"]
         machine_note = "【粗筛拒绝】\n" + "\n".join(f"- {r}" for r in reject_reasons)
         try:
-            client.update_main_record(record_id, {
+            client.update_record(app_token, table_id, record_id, {
                 review_status_field: conclusion_map.get("reject", "已拒绝"),
                 machine_note_field: machine_note,
             })
@@ -408,7 +411,7 @@ def _finalize(client: FeishuClient, record_id: str, results: list, status: str,
     elif status == "通过":
         print("\n--- 主表回填（粗筛通过，进入AI评审） ---")
         try:
-            client.update_main_record(record_id, {
+            client.update_record(app_token, table_id, record_id, {
                 review_status_field: conclusion_map.get("manual_review", "初审中"),
             })
             print("主表回填成功")

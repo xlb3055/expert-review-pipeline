@@ -184,11 +184,9 @@ class TestFeishuUtils(unittest.TestCase):
 
     def test_feishu_client_construction(self):
         from core.feishu_utils import FeishuClient
-        client = FeishuClient("id", "secret", "token", "table")
+        client = FeishuClient("id", "secret")
         self.assertEqual(client.app_id, "id")
         self.assertEqual(client.app_secret, "secret")
-        self.assertEqual(client.app_token, "token")
-        self.assertEqual(client.table_id, "table")
 
     def test_feishu_client_from_config(self):
         from core.feishu_utils import FeishuClient
@@ -202,7 +200,6 @@ class TestFeishuUtils(unittest.TestCase):
         }
         client = FeishuClient.from_config(config)
         self.assertEqual(client.app_id, "cfg_id")
-        self.assertEqual(client.table_id, "cfg_table")
 
 
 class TestTraceParser(unittest.TestCase):
