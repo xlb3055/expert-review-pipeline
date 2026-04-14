@@ -78,7 +78,6 @@ conclusion_to_status:
 
 pre_screen:
   min_conversation_rounds: 3
-  min_task_description_length: 50
 
 workspace:
   trace_path: "/workspace/trace.jsonl"

@@ -4,13 +4,14 @@
 """
 第一层：7 项硬门槛初筛
 
-直接在火山流水线中执行（不需要 Daytona），速度快（2-3 秒）。
-执行 7 项硬性校验。
-
-数据流：
-  - 从主表读取数据（record_id 是主表的 record_id）
-  - 粗筛拒绝时直接回填主表（审核状态=已拒绝 + 机审说明）
-  - 粗筛通过时回填主表（审核状态=初审中）
+硬门槛标准：
+  1. 任务真实性 — 来自真实工作场景，不是 demo、练习题、拼凑题
+  2. Trace 完整性 — 提交原始完整 trace，不删失败片段，不做后拼接
+  3. 工具闭环存在 — 至少有 1 个清晰的 提需求→工具执行→观察结果→调整动作 闭环
+  4. 最终产物存在 — 有代码、页面、文档、流程配置或可验证交付物
+  5. 验证动作存在 — 至少有 1 次明确验证，不是"看起来可以"
+  6. Trace-产物一致 — trace 中做的事情和最终提交物能对上
+  7. 合规可用 — 可脱敏、无密钥、无敏感客户数据、无不可外发信息
 
 退出码:
   0 = 通过（继续 AI 评审）
@@ -37,12 +38,13 @@ from core.feishu_utils import (
     extract_link_url,
 )
 from core.trace_parser import TraceAnalysis, parse_trace_file
+from core.trace_extractor import extract_user_focused_content
 
 
 # ---------- 拒绝关键词（纯 demo / hello world / 测试类任务） ----------
 
 _REJECT_PATTERNS = re.compile(
-    r"(^(hello\s*world|测试|test|demo|示例|example|样例)\s*$)",
+    r"(^(hello\s*world|测试|test|demo|示例|example|样例|练习|exercise)\s*$)",
     re.IGNORECASE,
 )
 
@@ -63,32 +65,30 @@ _SECRET_PATTERNS = re.compile(
 
 # ---------- 7 项检查 ----------
 
-def check_task_authenticity(fields: dict, desc_field: str, min_length: int) -> dict:
-    """检查 1: 任务描述 >= min_length 字，且不含纯 demo/hello world/测试。"""
+def check_task_authenticity(fields: dict, desc_field: str) -> dict:
+    """检查 1: 任务真实性 — 不是 demo/练习/拼凑题。"""
     desc = normalize_field_value(fields.get(desc_field, ""))
-    length = len(desc)
 
-    if length < min_length:
+    if not desc.strip():
         return {
             "check": "task_authenticity",
             "passed": False,
-            "detail": f"任务描述长度 {length} < {min_length}，请补充任务描述",
+            "detail": "任务说明为空",
             "action": "reject",
         }
 
-    desc_stripped = desc.strip()
-    if _REJECT_PATTERNS.search(desc_stripped):
+    if _REJECT_PATTERNS.search(desc.strip()):
         return {
             "check": "task_authenticity",
             "passed": False,
-            "detail": "任务描述为纯 demo/hello world/测试类内容，不满足真实任务要求",
+            "detail": "任务描述为纯 demo/hello world/测试/练习类内容，不满足真实任务要求",
             "action": "reject",
         }
 
     return {
         "check": "task_authenticity",
         "passed": True,
-        "detail": f"任务描述长度 {length} >= {min_length}，内容合规",
+        "detail": f"任务描述内容合规（{len(desc)}字）",
     }
 
 
@@ -146,7 +146,7 @@ def check_tool_loop_exists(trace: TraceAnalysis) -> dict:
 
 
 def check_final_product_exists(fields: dict, product_field: str) -> dict:
-    """检查 4: 最终产物不为空（主表是附件类型，也可能是链接）。"""
+    """检查 4: 最终产物不为空。"""
     product_value = fields.get(product_field, "")
 
     attachment = extract_attachment_file_token(product_value)
@@ -181,48 +181,17 @@ def check_final_product_exists(fields: dict, product_field: str) -> dict:
     }
 
 
-def check_verification_exists(trace_content: str) -> dict:
-    """检查 5: Trace 中有验证类工具调用（Bash/execute/terminal 等执行类工具）。"""
-    verification_tools = {"bash", "execute", "terminal", "shell"}
-    found = False
+def check_verification_exists(clean_trace: str) -> dict:
+    """检查 5: 精简 trace 中有验证类工具调用（Bash/execute 等）。
 
-    for line in trace_content.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
+    使用过滤噪音后的精简 trace（只含用户输入+工具调用摘要）。
+    """
+    verification_keywords = re.compile(
+        r"\[工具调用\]\s*(bash|execute|terminal|shell)",
+        re.IGNORECASE,
+    )
 
-        if not isinstance(entry, dict):
-            continue
-
-        if entry.get("type") == "assistant":
-            for content_source in (entry.get("content", []),
-                                    entry.get("message", {}).get("content", []) if isinstance(entry.get("message"), dict) else []):
-                if isinstance(content_source, list):
-                    for block in content_source:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            tool_name = (block.get("name") or "").lower()
-                            if tool_name in verification_tools:
-                                found = True
-                                break
-                            if tool_name in ("bash",):
-                                found = True
-                                break
-                if found:
-                    break
-
-        if entry.get("type") == "tool_use":
-            tool_name = (entry.get("name") or "").lower()
-            if tool_name in verification_tools:
-                found = True
-
-        if found:
-            break
-
-    if found:
+    if verification_keywords.search(clean_trace):
         return {
             "check": "verification_exists",
             "passed": True,
@@ -257,9 +226,12 @@ def check_trace_product_consistent(trace: TraceAnalysis, has_product: bool) -> d
     }
 
 
-def check_compliance(trace_content: str) -> dict:
-    """检查 7: Trace 中不含明显密钥模式。"""
-    match = _SECRET_PATTERNS.search(trace_content)
+def check_compliance(clean_trace: str) -> dict:
+    """检查 7: 精简 trace 中不含明显密钥模式。
+
+    使用过滤噪音后的精简 trace，只看用户输入和工具调用内容。
+    """
+    match = _SECRET_PATTERNS.search(clean_trace)
     if match:
         snippet = match.group()[:30] + "..."
         return {
@@ -299,7 +271,6 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
         workspace.get("pre_screen_result_path", "/workspace/pre_screen_result.json"),
     )
     min_rounds = pre_cfg.get("min_conversation_rounds", 3)
-    min_desc_len = pre_cfg.get("min_task_description_length", 50)
 
     print("===== 硬门槛初筛开始 =====")
     print(f"Record ID (主表): {record_id}")
@@ -311,9 +282,9 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
 
     results = []
 
-    # 检查 1: 任务真实性（主表字段: 任务说明）
+    # 检查 1: 任务真实性
     desc_field = get_main_field_name(config, "task_description")
-    check1 = check_task_authenticity(fields, desc_field, min_desc_len)
+    check1 = check_task_authenticity(fields, desc_field)
     results.append(check1)
     print(f"[检查1] task_authenticity: {'通过' if check1['passed'] else '不通过'} — {check1['detail']}")
 
@@ -322,7 +293,7 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     trace_field = fields.get(trace_field_name)
     file_token = extract_attachment_file_token(trace_field)
     trace = TraceAnalysis()
-    trace_content = ""
+    clean_trace = ""
 
     if file_token:
         print("\n--- 下载 Trace 附件 ---")
@@ -336,11 +307,9 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
             trace = parse_trace_file(trace_output_path)
             print(f"Trace 解析结果: 轮次={trace.conversation_rounds}, 模型={trace.model_name}, "
                   f"工具调用={trace.tool_call_count}, 总行数={trace.total_lines}")
-            try:
-                with open(trace_output_path, "r", encoding="utf-8") as f:
-                    trace_content = f.read()
-            except Exception:
-                trace_content = ""
+            # 用 trace_extractor 提取精简内容（过滤噪音，只保留用户输入+工具调用摘要）
+            clean_trace = extract_user_focused_content(trace_output_path, max_bytes=500000)
+            print(f"精简 Trace 内容: {len(clean_trace)} 字符")
         except Exception as e:
             results.append({
                 "check": "trace_download",
@@ -366,12 +335,12 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     results.append(check4)
     print(f"[检查4] final_product_exists: {'通过' if check4['passed'] else '不通过'} — {check4['detail']}")
 
-    # 检查 5: 验证类工具调用
-    check5 = check_verification_exists(trace_content)
+    # 检查 5: 验证动作（使用精简 trace）
+    check5 = check_verification_exists(clean_trace)
     results.append(check5)
     print(f"[检查5] verification_exists: {'通过' if check5['passed'] else '不通过'} — {check5['detail']}")
 
-    # 检查 6: Trace 与产物一致性
+    # 检查 6: Trace-产物一致
     product_value = fields.get(product_field, "")
     has_product = bool(
         extract_attachment_file_token(product_value)
@@ -382,8 +351,8 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     results.append(check6)
     print(f"[检查6] trace_product_consistent: {'通过' if check6['passed'] else '不通过'} — {check6['detail']}")
 
-    # 检查 7: 合规性
-    check7 = check_compliance(trace_content)
+    # 检查 7: 合规可用（使用精简 trace）
+    check7 = check_compliance(clean_trace)
     results.append(check7)
     print(f"[检查7] compliance_check: {'通过' if check7['passed'] else '不通过'} — {check7['detail']}")
 
