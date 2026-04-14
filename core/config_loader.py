@@ -5,7 +5,6 @@
 配置加载器
 
 加载项目 config.yaml，合并环境变量，提供字段映射查询。
-支持双表配置（主表 + 评审表）。
 """
 
 import os
@@ -45,26 +44,6 @@ def load_project_config(project_dir: str) -> dict:
         feishu.get("main_table_id") or os.environ.get("MAIN_TABLE_ID") or ""
     )
 
-    # 评审表配置（留痕）
-    feishu["review_app_token"] = (
-        feishu.get("review_app_token") or os.environ.get("REVIEW_APP_TOKEN") or ""
-    )
-    feishu["review_table_id"] = (
-        feishu.get("review_table_id") or os.environ.get("REVIEW_TABLE_ID") or ""
-    )
-
-    # 向后兼容：旧的 app_token / table_id 映射到评审表
-    feishu["app_token"] = (
-        feishu.get("app_token")
-        or feishu.get("review_app_token")
-        or os.environ.get("BITABLE_APP_TOKEN") or os.environ.get("APP_TOKEN") or ""
-    )
-    feishu["table_id"] = (
-        feishu.get("table_id")
-        or feishu.get("review_table_id")
-        or os.environ.get("BITABLE_TABLE_ID") or os.environ.get("COMMIT_TABLE_ID") or ""
-    )
-
     # 校验必填字段
     _validate_feishu(feishu)
 
@@ -83,19 +62,6 @@ def _validate_feishu(feishu: dict):
     if missing:
         print(f"错误: 缺少飞书配置（config.yaml 或环境变量）: {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
-
-
-def get_field_name(config: dict, logical_name: str) -> str:
-    """
-    通过逻辑名获取实际飞书字段名（评审表）。
-
-    例: get_field_name(config, "trace_file") → "Trace文件"
-    """
-    mapping = config.get("field_mapping", {})
-    name = mapping.get(logical_name)
-    if name is None:
-        raise KeyError(f"字段映射中未找到逻辑名: {logical_name}")
-    return name
 
 
 def get_main_field_name(config: dict, logical_name: str) -> str:

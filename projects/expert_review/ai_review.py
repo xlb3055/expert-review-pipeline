@@ -10,7 +10,7 @@
 
 数据流：
   - 从主表读取数据（record_id 是主表的 record_id）
-  - 用 trace_extractor 提取用户聚焦内容（替代 truncate_trace_content）
+  - 用 trace_extractor 提取用户聚焦内容
   - AI 评审结果保存到本地 JSON，供 writeback 阶段使用
 
 用法:
@@ -45,7 +45,6 @@ def _build_input_text(fields: dict, trace_content: str, config: dict) -> str:
     expert_id = normalize_field_value(fields.get(mfm.get("expert_id", "talent_id"), ""))
     position = normalize_field_value(fields.get(mfm.get("position", "岗位方向"), ""))
 
-    # 主表最终产物可能是附件类型，尝试提取链接
     product_field = mfm.get("final_product", "最终产物")
     product_value = fields.get(product_field, "")
     product_link = extract_link_url(product_value)
@@ -93,7 +92,6 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     client = FeishuClient.from_config(config)
     ai_cfg = config.get("ai_review", {})
     workspace = config.get("workspace", {})
-    mfm = config.get("main_field_mapping", {})
 
     trace_input_path = os.environ.get(
         "TRACE_OUTPUT_PATH",
@@ -170,24 +168,7 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     prompt_content = prompt_file.read_text(encoding="utf-8")
     schema_content = schema_file.read_text(encoding="utf-8")
 
-    # 6. 读取评审表 record_id（由 pre_screen 创建）
-    review_record_id = None
-    review_id_path = os.path.join(os.path.dirname(result_path), "review_record_id.txt")
-    if os.path.exists(review_id_path):
-        with open(review_id_path, "r") as f:
-            review_record_id = f.read().strip()
-        print(f"评审表 record_id: {review_record_id}")
-
-    # 7. 回填评审表进行中状态
-    fm = config.get("field_mapping", {})
-    ai_status_field = fm.get("ai_review_status", "AI评审状态")
-    if review_record_id:
-        try:
-            client.update_review_record(review_record_id, {ai_status_field: "进行中"})
-        except Exception as e:
-            print(f"回填评审表进行中状态失败（非致命）: {e}")
-
-    # 8. 在 Daytona 沙箱中执行 Claude
+    # 6. 在 Daytona 沙箱中执行 Claude
     print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")
     result = run_claude_in_sandbox(run_config, prompt_content, schema_content, input_text)
 
@@ -198,11 +179,11 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
 
     result_obj = result.result_json
 
-    # 9. 解包 schema 包装 — 适配新双模块结构
+    # 7. 解包 schema 包装
     if "expert_review_result" in result_obj and "expert_ability" not in result_obj:
         result_obj = result_obj["expert_review_result"]
 
-    # 10. 保存结果
+    # 8. 保存结果
     result_dir = os.path.dirname(result_path)
     if result_dir:
         os.makedirs(result_dir, exist_ok=True)

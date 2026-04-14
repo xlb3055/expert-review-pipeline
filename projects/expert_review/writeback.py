@@ -2,14 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-第三层：结果回填
+第三层：结果回填主表
 
 读取粗筛和 AI 评审的结果 JSON，提取双模块分数（专家能力分 + Trace 资产分），
-判定最终结论。
-
-数据流：
-  - 评审表留痕：写入所有分数 + AI评审结果 JSON + 最终结论
-  - 主表回填：审核状态 + 机审说明
+判定最终结论，回填主表（审核状态 + 机审说明）。
 
 用法:
   python3 writeback.py --record-id <record_id> --project-dir <dir>
@@ -20,7 +16,7 @@ import json
 import os
 import sys
 
-from core.config_loader import load_project_config, get_field_name
+from core.config_loader import load_project_config
 from core.feishu_utils import FeishuClient
 
 
@@ -125,14 +121,13 @@ def _build_machine_note(conclusion: str, expert_scores: dict, trace_scores: dict
 
 def run_writeback(record_id: str, project_dir: str) -> int:
     """
-    执行结果回填。
+    执行结果回填主表。
 
     record_id: 主表的 record_id
     返回: 0=成功, 1=失败
     """
     config = load_project_config(project_dir)
     client = FeishuClient.from_config(config)
-    fm = config.get("field_mapping", {})
     mfm = config.get("main_field_mapping", {})
     scoring = config.get("scoring", {})
     workspace = config.get("workspace", {})
@@ -152,16 +147,8 @@ def run_writeback(record_id: str, project_dir: str) -> int:
         workspace.get("ai_review_result_path", "/workspace/ai_review_result.json"),
     )
 
-    # 读取评审表 record_id（由 pre_screen 创建）
-    review_record_id = None
-    review_id_path = os.path.join(os.path.dirname(ai_review_path), "review_record_id.txt")
-    if os.path.exists(review_id_path):
-        with open(review_id_path, "r") as f:
-            review_record_id = f.read().strip()
-
     print("===== 结果回填开始 =====")
     print(f"Record ID (主表): {record_id}")
-    print(f"评审表 Record ID: {review_record_id or '(未找到)'}")
 
     # 1. 读取粗筛结果
     print("\n--- 读取粗筛结果 ---")
@@ -205,93 +192,19 @@ def run_writeback(record_id: str, project_dir: str) -> int:
     )
     print(f"\n最终结论: {conclusion}")
 
-    # 5. 确定 AI 评审状态
-    if ai_result.get("error"):
-        ai_status = "待人工复核"
-    elif conclusion in ("拒绝",):
-        ai_status = "拒绝"
-    elif "待人工复核" in conclusion:
-        ai_status = "待人工复核"
-    else:
-        ai_status = "通过"
-
-    # 6. 评审表留痕
-    print("\n--- 评审表留痕 ---")
-
-    # 专家能力分字段映射
-    expert_dim_mapping = {
-        "task_complexity": "task_complexity_score",
-        "iteration_quality": "iteration_quality_score",
-        "professional_judgment": "professional_judgment_score",
-    }
-
-    # Trace 资产分字段映射
-    trace_dim_mapping = {
-        "authenticity": "authenticity_score",
-        "info_density": "info_density_score",
-        "tool_loop": "tool_loop_score",
-        "correction_value": "correction_value_score",
-        "verification_loop": "verification_loop_score",
-        "compliance": "compliance_score",
-    }
-
-    review_fields = {
-        fm.get("ai_review_status", "AI评审状态"): ai_status,
-        fm.get("ai_review_result", "AI评审结果"): json.dumps(ai_result, ensure_ascii=False, indent=2),
-        fm.get("final_conclusion", "最终结论"): conclusion,
-        fm.get("expert_ability_total", "总分"): expert_scores["total"],
-        fm.get("trace_asset_total", "Trace资产总分"): trace_scores["total"],
-    }
-
-    # 专家能力三子维度
-    for dim in expert_dims:
-        key = dim["key"]
-        logical_name = expert_dim_mapping.get(key, f"{key}_score")
-        feishu_field = fm.get(logical_name, key)
-        review_fields[feishu_field] = expert_scores[key]
-
-    # Trace 资产六子维度
-    for dim in trace_dims:
-        key = dim["key"]
-        logical_name = trace_dim_mapping.get(key, f"{key}_score")
-        feishu_field = fm.get(logical_name, key)
-        review_fields[feishu_field] = trace_scores[key]
-
-    if review_record_id:
-        try:
-            client.update_review_record(review_record_id, review_fields)
-            print("评审表留痕成功")
-            for k, v in review_fields.items():
-                if k == fm.get("ai_review_result", "AI评审结果"):
-                    print(f"  {k}: (JSON, {len(str(v))} 字符)")
-                else:
-                    print(f"  {k}: {v}")
-        except Exception as e:
-            print(f"评审表留痕失败: {e}", file=sys.stderr)
-    else:
-        # 如果没有评审表 record_id，创建新记录
-        try:
-            review_record = client.create_review_record(review_fields)
-            review_record_id = review_record.get("record_id")
-            print(f"评审表留痕成功 (新建), record_id={review_record_id}")
-        except Exception as e:
-            print(f"评审表留痕失败: {e}", file=sys.stderr)
-
-    # 7. 主表回填（审核状态 + 机审说明）
-    print("\n--- 主表回填 ---")
-
-    # 结论 → 主表审核状态映射
+    # 5. 结论 → 主表审核状态映射
     if conclusion == "拒绝":
         main_status = conclusion_map.get("reject", "已拒绝")
     elif "待人工复核" in conclusion:
         main_status = conclusion_map.get("manual_review", "初审中")
     else:
-        # "可储备专家" / "高价值trace" / 两者兼有
         main_status = conclusion_map.get("pass", "最终审核通过")
 
-    # 组装机审说明
+    # 6. 组装机审说明
     machine_note = _build_machine_note(conclusion, expert_scores, trace_scores, ai_result)
 
+    # 7. 回填主表
+    print("\n--- 主表回填 ---")
     review_status_field = mfm.get("review_status", "审核状态")
     machine_note_field = mfm.get("machine_review_note", "机审说明")
 

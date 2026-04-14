@@ -6,9 +6,6 @@ feishu:
   # 主表 — 数据源 + 最终回填
   main_app_token: "TdiNb881Ja89b9s6FwNcOH1Vn4c"
   main_table_id: "tblE2Qdot3No2kUC"
-  # 评审表 — 留痕
-  review_app_token: "INiPbaSwsaKCffszIDwc1dYPnph"
-  review_table_id: "tblzyPQ33dOle6lY"
   # 凭证（从环境变量读取）
   app_id: ""
   app_secret: ""
@@ -72,25 +69,6 @@ main_field_mapping:
   original_product: "原始产物"
   review_status: "审核状态"      # 回填目标
   machine_review_note: "机审说明" # 回填目标
-
-# 评审表字段映射（留痕用）
-field_mapping:
-  pre_screen_status: "粗筛状态"
-  pre_screen_detail: "粗筛详情"
-  ai_review_status: "AI评审状态"
-  ai_review_result: "AI评审结果"
-  task_complexity_score: "任务复杂度"
-  iteration_quality_score: "迭代质量"
-  professional_judgment_score: "专业判断"
-  expert_ability_total: "总分"
-  trace_asset_total: "Trace资产总分"
-  authenticity_score: "真实性"
-  info_density_score: "信息密度"
-  tool_loop_score: "工具闭环"
-  correction_value_score: "纠偏价值"
-  verification_loop_score: "验证闭环"
-  compliance_score: "合规可用性"
-  final_conclusion: "最终结论"
 
 # 主表审核状态映射
 conclusion_to_status:

@@ -9,8 +9,8 @@
 
 数据流：
   - 从主表读取数据（record_id 是主表的 record_id）
-  - 评审表创建留痕记录（粗筛状态+详情）
-  - 主表回填审核状态（仅拒绝时）
+  - 粗筛拒绝时直接回填主表（审核状态=已拒绝 + 机审说明）
+  - 粗筛通过时回填主表（审核状态=初审中）
 
 退出码:
   0 = 通过（继续 AI 评审）
@@ -28,7 +28,7 @@ import os
 import re
 import sys
 
-from core.config_loader import load_project_config, get_field_name, get_main_field_name
+from core.config_loader import load_project_config, get_main_field_name
 from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
@@ -47,27 +47,16 @@ _REJECT_PATTERNS = re.compile(
 )
 
 # ---------- 密钥泄露正则 ----------
-# 只匹配硬编码的密钥值（sk-xxx, ghp_xxx 等），不匹配代码中的变量赋值
 
 _SECRET_PATTERNS = re.compile(
     r"("
-    r"sk-[a-zA-Z0-9]{20,}"           # OpenAI / Anthropic 密钥
-    r"|ghp_[a-zA-Z0-9]{36,}"         # GitHub Personal Access Token
-    r"|gho_[a-zA-Z0-9]{36,}"         # GitHub OAuth Token
-    r"|xoxb-[a-zA-Z0-9\-]{20,}"      # Slack Bot Token
-    r"|AKIA[0-9A-Z]{16}"             # AWS Access Key
-    r"|-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----"  # PEM 私钥
+    r"sk-[a-zA-Z0-9]{20,}"
+    r"|ghp_[a-zA-Z0-9]{36,}"
+    r"|gho_[a-zA-Z0-9]{36,}"
+    r"|xoxb-[a-zA-Z0-9\-]{20,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----"
     r")",
-    re.IGNORECASE,
-)
-
-# ---------- 验证类工具关键词 ----------
-
-_VERIFICATION_KEYWORDS = re.compile(
-    r"(bash|execute|test|run|preview|terminal|shell|npm\s+test|pytest|"
-    r"jest|cargo\s+test|go\s+test|make\s+test|python.*-m\s+pytest|"
-    r"node\s|python3?\s|java\s|javac|gcc|g\+\+|rustc|"
-    r"curl|wget|open\s|xdg-open|start\s)",
     re.IGNORECASE,
 )
 
@@ -160,7 +149,6 @@ def check_final_product_exists(fields: dict, product_field: str) -> dict:
     """检查 4: 最终产物不为空（主表是附件类型，也可能是链接）。"""
     product_value = fields.get(product_field, "")
 
-    # 检查附件类型
     attachment = extract_attachment_file_token(product_value)
     if attachment:
         return {
@@ -169,7 +157,6 @@ def check_final_product_exists(fields: dict, product_field: str) -> dict:
             "detail": "最终产物存在（附件）",
         }
 
-    # 检查链接类型
     link = extract_link_url(product_value)
     if link:
         return {
@@ -178,7 +165,6 @@ def check_final_product_exists(fields: dict, product_field: str) -> dict:
             "detail": "最终产物存在（链接）",
         }
 
-    # 检查文本类型（非空字符串）
     text = normalize_field_value(product_value)
     if text.strip():
         return {
@@ -196,10 +182,7 @@ def check_final_product_exists(fields: dict, product_field: str) -> dict:
 
 
 def check_verification_exists(trace_content: str) -> dict:
-    """检查 5: Trace 中有验证类工具调用（Bash/execute/terminal 等执行类工具）。
-
-    只检查 tool_use 块中的工具名称，不搜索代码内容，避免误报。
-    """
+    """检查 5: Trace 中有验证类工具调用（Bash/execute/terminal 等执行类工具）。"""
     verification_tools = {"bash", "execute", "terminal", "shell"}
     found = False
 
@@ -215,7 +198,6 @@ def check_verification_exists(trace_content: str) -> dict:
         if not isinstance(entry, dict):
             continue
 
-        # 检查 assistant 消息中 tool_use 块的工具名
         if entry.get("type") == "assistant":
             for content_source in (entry.get("content", []),
                                     entry.get("message", {}).get("content", []) if isinstance(entry.get("message"), dict) else []):
@@ -226,14 +208,12 @@ def check_verification_exists(trace_content: str) -> dict:
                             if tool_name in verification_tools:
                                 found = True
                                 break
-                            # 也检查 Bash 工具的输入中是否有测试/运行命令
                             if tool_name in ("bash",):
                                 found = True
                                 break
                 if found:
                     break
 
-        # 检查顶层 tool_use 类型
         if entry.get("type") == "tool_use":
             tool_name = (entry.get("name") or "").lower()
             if tool_name in verification_tools:
@@ -306,7 +286,6 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     """
     config = load_project_config(project_dir)
     client = FeishuClient.from_config(config)
-    fm = config.get("field_mapping", {})
     mfm = config.get("main_field_mapping", {})
     pre_cfg = config.get("pre_screen", {})
     workspace = config.get("workspace", {})
@@ -338,11 +317,11 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     results.append(check1)
     print(f"[检查1] task_authenticity: {'通过' if check1['passed'] else '不通过'} — {check1['detail']}")
 
-    # 检查前先判断 Trace 附件是否存在，如存在则下载解析
+    # 下载 Trace 附件
     trace_field_name = get_main_field_name(config, "trace_file")
     trace_field = fields.get(trace_field_name)
     file_token = extract_attachment_file_token(trace_field)
-    trace = TraceAnalysis()  # 默认空
+    trace = TraceAnalysis()
     trace_content = ""
 
     if file_token:
@@ -351,14 +330,12 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
         try:
-            # 优先使用附件自带的 url 下载
             download_url = extract_attachment_url(trace_field)
             client.download_attachment(file_token, trace_output_path,
                                        download_url=download_url or None)
             trace = parse_trace_file(trace_output_path)
             print(f"Trace 解析结果: 轮次={trace.conversation_rounds}, 模型={trace.model_name}, "
                   f"工具调用={trace.tool_call_count}, 总行数={trace.total_lines}")
-            # 读取原始内容用于合规检查和验证检查
             try:
                 with open(trace_output_path, "r", encoding="utf-8") as f:
                     trace_content = f.read()
@@ -383,7 +360,7 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     results.append(check3)
     print(f"[检查3] tool_loop_exists: {'通过' if check3['passed'] else '不通过'} — {check3['detail']}")
 
-    # 检查 4: 最终产物（主表字段: 最终产物，附件类型）
+    # 检查 4: 最终产物
     product_field = get_main_field_name(config, "final_product")
     check4 = check_final_product_exists(fields, product_field)
     results.append(check4)
@@ -424,8 +401,7 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
 
 def _finalize(client: FeishuClient, record_id: str, results: list, status: str,
               result_path: str, config: dict) -> int:
-    """汇总结果、评审表留痕、主表回填、保存本地 JSON、返回退出码。"""
-    fm = config.get("field_mapping", {})
+    """汇总结果、主表回填、保存本地 JSON、返回退出码。"""
     mfm = config.get("main_field_mapping", {})
     conclusion_map = config.get("conclusion_to_status", {})
 
@@ -444,35 +420,11 @@ def _finalize(client: FeishuClient, record_id: str, results: list, status: str,
         json.dump(result_obj, f, ensure_ascii=False, indent=2)
     print(f"\n粗筛结果已保存: {result_path}")
 
-    # -- 评审表留痕：创建一条记录 --
-    status_field = fm.get("pre_screen_status", "粗筛状态")
-    detail_field = fm.get("pre_screen_detail", "粗筛详情")
-
-    print(f"\n--- 评审表留痕 (粗筛状态={status}) ---")
-    review_record_id = None
-    try:
-        review_fields = {
-            status_field: status,
-            detail_field: json.dumps(result_obj, ensure_ascii=False, indent=2),
-        }
-        review_record = client.create_review_record(review_fields)
-        review_record_id = review_record.get("record_id")
-        print(f"评审表留痕成功, record_id={review_record_id}")
-
-        # 保存评审表 record_id 供后续阶段使用
-        if review_record_id:
-            review_id_path = os.path.join(os.path.dirname(result_path), "review_record_id.txt")
-            with open(review_id_path, "w") as f:
-                f.write(review_record_id)
-    except Exception as e:
-        print(f"评审表留痕失败（非致命）: {e}", file=sys.stderr)
-
     # -- 主表回填 --
     review_status_field = mfm.get("review_status", "审核状态")
     machine_note_field = mfm.get("machine_review_note", "机审说明")
 
     if status == "拒绝":
-        # 粗筛拒绝 → 主表直接标记已拒绝
         print("\n--- 主表回填（粗筛拒绝） ---")
         reject_reasons = [r["detail"] for r in results if not r["passed"] and r.get("action") == "reject"]
         machine_note = "【粗筛拒绝】\n" + "\n".join(f"- {r}" for r in reject_reasons)
@@ -485,7 +437,6 @@ def _finalize(client: FeishuClient, record_id: str, results: list, status: str,
         except Exception as e:
             print(f"主表回填失败: {e}", file=sys.stderr)
     elif status == "通过":
-        # 粗筛通过 → 主表标记初审中
         print("\n--- 主表回填（粗筛通过，进入AI评审） ---")
         try:
             client.update_main_record(record_id, {
