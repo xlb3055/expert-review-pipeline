@@ -5,6 +5,7 @@
 配置加载器
 
 加载项目 config.yaml，合并环境变量，提供字段映射查询。
+支持双表配置（主表 + 评审表）。
 """
 
 import os
@@ -35,11 +36,33 @@ def load_project_config(project_dir: str) -> dict:
     feishu["app_secret"] = (
         feishu.get("app_secret") or os.environ.get("FEISHU_APP_SECRET") or os.environ.get("APP_SECRET") or ""
     )
+
+    # 主表配置（数据源 + 回填）
+    feishu["main_app_token"] = (
+        feishu.get("main_app_token") or os.environ.get("MAIN_APP_TOKEN") or os.environ.get("BITABLE_APP_TOKEN") or ""
+    )
+    feishu["main_table_id"] = (
+        feishu.get("main_table_id") or os.environ.get("MAIN_TABLE_ID") or ""
+    )
+
+    # 评审表配置（留痕）
+    feishu["review_app_token"] = (
+        feishu.get("review_app_token") or os.environ.get("REVIEW_APP_TOKEN") or ""
+    )
+    feishu["review_table_id"] = (
+        feishu.get("review_table_id") or os.environ.get("REVIEW_TABLE_ID") or ""
+    )
+
+    # 向后兼容：旧的 app_token / table_id 映射到评审表
     feishu["app_token"] = (
-        feishu.get("app_token") or os.environ.get("BITABLE_APP_TOKEN") or os.environ.get("APP_TOKEN") or ""
+        feishu.get("app_token")
+        or feishu.get("review_app_token")
+        or os.environ.get("BITABLE_APP_TOKEN") or os.environ.get("APP_TOKEN") or ""
     )
     feishu["table_id"] = (
-        feishu.get("table_id") or os.environ.get("BITABLE_TABLE_ID") or os.environ.get("COMMIT_TABLE_ID") or ""
+        feishu.get("table_id")
+        or feishu.get("review_table_id")
+        or os.environ.get("BITABLE_TABLE_ID") or os.environ.get("COMMIT_TABLE_ID") or ""
     )
 
     # 校验必填字段
@@ -53,8 +76,8 @@ def _validate_feishu(feishu: dict):
     required = {
         "app_id": "FEISHU_APP_ID",
         "app_secret": "FEISHU_APP_SECRET",
-        "app_token": "BITABLE_APP_TOKEN",
-        "table_id": "BITABLE_TABLE_ID",
+        "main_app_token": "MAIN_APP_TOKEN",
+        "main_table_id": "MAIN_TABLE_ID",
     }
     missing = [env_hint for key, env_hint in required.items() if not feishu.get(key)]
     if missing:
@@ -64,7 +87,7 @@ def _validate_feishu(feishu: dict):
 
 def get_field_name(config: dict, logical_name: str) -> str:
     """
-    通过逻辑名获取实际飞书字段名。
+    通过逻辑名获取实际飞书字段名（评审表）。
 
     例: get_field_name(config, "trace_file") → "Trace文件"
     """
@@ -72,4 +95,17 @@ def get_field_name(config: dict, logical_name: str) -> str:
     name = mapping.get(logical_name)
     if name is None:
         raise KeyError(f"字段映射中未找到逻辑名: {logical_name}")
+    return name
+
+
+def get_main_field_name(config: dict, logical_name: str) -> str:
+    """
+    通过逻辑名获取实际飞书字段名（主表）。
+
+    例: get_main_field_name(config, "task_description") → "任务说明"
+    """
+    mapping = config.get("main_field_mapping", {})
+    name = mapping.get(logical_name)
+    if name is None:
+        raise KeyError(f"主表字段映射中未找到逻辑名: {logical_name}")
     return name

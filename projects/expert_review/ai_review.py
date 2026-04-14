@@ -8,7 +8,10 @@
 - 专家能力分（0-10）
 - Trace 资产分（0-12）
 
-Daytona 沙箱生命周期委托给 core.daytona_runner。
+数据流：
+  - 从主表读取数据（record_id 是主表的 record_id）
+  - 用 trace_extractor 提取用户聚焦内容（替代 truncate_trace_content）
+  - AI 评审结果保存到本地 JSON，供 writeback 阶段使用
 
 用法:
   python3 ai_review.py --record-id <record_id> --project-dir <dir>
@@ -21,25 +24,33 @@ import sys
 import time
 from pathlib import Path
 
-from core.config_loader import load_project_config, get_field_name
+from core.config_loader import load_project_config, get_main_field_name
 from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
     extract_link_url,
+    extract_attachment_file_token,
+    extract_attachment_url,
 )
 from core.daytona_runner import DaytonaRunConfig, run_claude_in_sandbox
-from core.trace_parser import truncate_trace_content
+from core.trace_extractor import extract_user_focused_content
 
 
 def _build_input_text(fields: dict, trace_content: str, config: dict) -> str:
-    """组装 AI 评审的输入文本。"""
-    fm = config.get("field_mapping", {})
+    """组装 AI 评审的输入文本（使用主表字段映射）。"""
+    mfm = config.get("main_field_mapping", {})
 
-    task_desc = normalize_field_value(fields.get(fm.get("task_description", "任务描述"), ""))
-    expert_name = normalize_field_value(fields.get(fm.get("expert_name", "专家姓名"), ""))
-    expert_id = normalize_field_value(fields.get(fm.get("expert_id", "专家ID"), ""))
-    position = normalize_field_value(fields.get(fm.get("position", "岗位方向"), ""))
-    product_link = extract_link_url(fields.get(fm.get("final_product", "最终产物"), ""))
+    task_desc = normalize_field_value(fields.get(mfm.get("task_description", "任务说明"), ""))
+    expert_name = normalize_field_value(fields.get(mfm.get("expert_name", "提交人"), ""))
+    expert_id = normalize_field_value(fields.get(mfm.get("expert_id", "talent_id"), ""))
+    position = normalize_field_value(fields.get(mfm.get("position", "岗位方向"), ""))
+
+    # 主表最终产物可能是附件类型，尝试提取链接
+    product_field = mfm.get("final_product", "最终产物")
+    product_value = fields.get(product_field, "")
+    product_link = extract_link_url(product_value)
+    if not product_link:
+        product_link = normalize_field_value(product_value)
 
     parts = [
         "# 专家考核产物 — AI 评审输入",
@@ -56,14 +67,14 @@ def _build_input_text(fields: dict, trace_content: str, config: dict) -> str:
 
     if product_link:
         parts.extend([
-            "## 最终产物链接",
+            "## 最终产物",
             product_link,
             "",
         ])
 
     parts.extend([
         "## Claude Code Trace 日志",
-        "以下是专家与 Claude Code 交互的完整 trace 记录（JSONL 格式）：",
+        "以下是专家与 Claude Code 交互的精简 trace 记录（用户消息 + 工具调用摘要）：",
         "",
         trace_content,
     ])
@@ -75,13 +86,14 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     """
     执行 AI 评审流程。
 
+    record_id: 主表的 record_id
     返回: 0=成功, 1=失败
     """
     config = load_project_config(project_dir)
     client = FeishuClient.from_config(config)
     ai_cfg = config.get("ai_review", {})
     workspace = config.get("workspace", {})
-    fm = config.get("field_mapping", {})
+    mfm = config.get("main_field_mapping", {})
 
     trace_input_path = os.environ.get(
         "TRACE_OUTPUT_PATH",
@@ -111,24 +123,40 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
 
     t0 = time.time()
     print("===== AI 评审开始 =====")
-    print(f"Record ID: {record_id}")
+    print(f"Record ID (主表): {record_id}")
     print(f"模型: {run_config.model}")
 
-    # 1. 获取飞书记录
-    print("\n--- 获取飞书记录 ---")
-    record = client.get_record(record_id)
+    # 1. 从主表获取记录
+    print("\n--- 从主表获取记录 ---")
+    record = client.get_main_record(record_id)
     fields = record.get("fields", {})
 
-    # 2. 读取 trace 内容
-    print("\n--- 读取 Trace 内容 ---")
-    trace_content = truncate_trace_content(trace_input_path, max_rounds=20, max_bytes=100000)
-    print(f"Trace 内容长度: {len(trace_content)} 字符")
+    # 2. 如果 Trace 文件不存在（pre_screen 已下载），需要重新下载
+    if not os.path.exists(trace_input_path):
+        print("\n--- Trace 文件不存在，重新下载 ---")
+        trace_field_name = get_main_field_name(config, "trace_file")
+        trace_field = fields.get(trace_field_name)
+        file_token = extract_attachment_file_token(trace_field)
+        if file_token:
+            output_dir = os.path.dirname(trace_input_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            download_url = extract_attachment_url(trace_field)
+            client.download_attachment(file_token, trace_input_path,
+                                       download_url=download_url or None)
+        else:
+            print("警告: 主表中未找到 Trace 附件", file=sys.stderr)
 
-    # 3. 组装输入文本
+    # 3. 用 trace_extractor 提取用户聚焦内容
+    print("\n--- 提取 Trace 用户聚焦内容 ---")
+    trace_content = extract_user_focused_content(trace_input_path, max_bytes=200000)
+    print(f"Trace 精简内容长度: {len(trace_content)} 字符")
+
+    # 4. 组装输入文本
     input_text = _build_input_text(fields, trace_content, config)
     print(f"输入文本总长度: {len(input_text)} 字符")
 
-    # 4. 读取 prompt 和 schema
+    # 5. 读取 prompt 和 schema
     prompt_file = Path(project_dir) / ai_cfg.get("prompt_file", "prompt.md")
     schema_file = Path(project_dir) / ai_cfg.get("schema_file", "schema.json")
 
@@ -142,14 +170,24 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     prompt_content = prompt_file.read_text(encoding="utf-8")
     schema_content = schema_file.read_text(encoding="utf-8")
 
-    # 5. 回填进行中状态
-    ai_status_field = fm.get("ai_review_status", "AI评审状态")
-    try:
-        client.update_record(record_id, {ai_status_field: "进行中"})
-    except Exception as e:
-        print(f"回填进行中状态失败（非致命）: {e}")
+    # 6. 读取评审表 record_id（由 pre_screen 创建）
+    review_record_id = None
+    review_id_path = os.path.join(os.path.dirname(result_path), "review_record_id.txt")
+    if os.path.exists(review_id_path):
+        with open(review_id_path, "r") as f:
+            review_record_id = f.read().strip()
+        print(f"评审表 record_id: {review_record_id}")
 
-    # 6. 在 Daytona 沙箱中执行 Claude
+    # 7. 回填评审表进行中状态
+    fm = config.get("field_mapping", {})
+    ai_status_field = fm.get("ai_review_status", "AI评审状态")
+    if review_record_id:
+        try:
+            client.update_review_record(review_record_id, {ai_status_field: "进行中"})
+        except Exception as e:
+            print(f"回填评审表进行中状态失败（非致命）: {e}")
+
+    # 8. 在 Daytona 沙箱中执行 Claude
     print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")
     result = run_claude_in_sandbox(run_config, prompt_content, schema_content, input_text)
 
@@ -160,13 +198,11 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
 
     result_obj = result.result_json
 
-    # 7. 解包 schema 包装 — 适配新双模块结构
-    # 新 schema 顶层是 expert_ability + trace_asset
-    # 如果返回了旧格式 expert_review_result 包装，则解包
+    # 9. 解包 schema 包装 — 适配新双模块结构
     if "expert_review_result" in result_obj and "expert_ability" not in result_obj:
         result_obj = result_obj["expert_review_result"]
 
-    # 8. 保存结果
+    # 10. 保存结果
     result_dir = os.path.dirname(result_path)
     if result_dir:
         os.makedirs(result_dir, exist_ok=True)
@@ -210,7 +246,7 @@ def _save_error_result(error_msg: str, result_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description="专家考核产物 AI 评审")
-    parser.add_argument("--record-id", required=True, help="飞书多维表格 record_id")
+    parser.add_argument("--record-id", required=True, help="主表 record_id")
     parser.add_argument("--project-dir", required=True, help="项目目录路径")
     args = parser.parse_args()
 

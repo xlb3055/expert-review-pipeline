@@ -2,10 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-第三层：结果回填飞书多维表格
+第三层：结果回填
 
 读取粗筛和 AI 评审的结果 JSON，提取双模块分数（专家能力分 + Trace 资产分），
-判定最终结论，回填飞书多维表格对应字段。
+判定最终结论。
+
+数据流：
+  - 评审表留痕：写入所有分数 + AI评审结果 JSON + 最终结论
+  - 主表回填：审核状态 + 机审说明
 
 用法:
   python3 writeback.py --record-id <record_id> --project-dir <dir>
@@ -91,17 +95,48 @@ def determine_conclusion(expert_total: int, trace_total: int,
         return "拒绝"
 
 
+def _build_machine_note(conclusion: str, expert_scores: dict, trace_scores: dict,
+                        ai_result: dict) -> str:
+    """组装机审说明文本。"""
+    expert_total = expert_scores["total"]
+    trace_total = trace_scores["total"]
+
+    lines = [
+        f"【AI机审结论】{conclusion}",
+        f"专家能力分: {expert_total}/10 "
+        f"(复杂度{expert_scores.get('task_complexity', 0)}/3, "
+        f"迭代{expert_scores.get('iteration_quality', 0)}/3, "
+        f"判断{expert_scores.get('professional_judgment', 0)}/4)",
+        f"Trace资产分: {trace_total}/12 "
+        f"(真实{trace_scores.get('authenticity', 0)}/2, "
+        f"密度{trace_scores.get('info_density', 0)}/2, "
+        f"工具{trace_scores.get('tool_loop', 0)}/2, "
+        f"纠偏{trace_scores.get('correction_value', 0)}/2, "
+        f"验证{trace_scores.get('verification_loop', 0)}/2, "
+        f"合规{trace_scores.get('compliance', 0)}/2)",
+    ]
+
+    overall = ai_result.get("overall_assessment", "")
+    if overall:
+        lines.append(f"综合评价: {overall}")
+
+    return "\n".join(lines)
+
+
 def run_writeback(record_id: str, project_dir: str) -> int:
     """
     执行结果回填。
 
+    record_id: 主表的 record_id
     返回: 0=成功, 1=失败
     """
     config = load_project_config(project_dir)
     client = FeishuClient.from_config(config)
     fm = config.get("field_mapping", {})
+    mfm = config.get("main_field_mapping", {})
     scoring = config.get("scoring", {})
     workspace = config.get("workspace", {})
+    conclusion_map = config.get("conclusion_to_status", {})
 
     expert_cfg = scoring.get("expert_ability", {})
     trace_cfg = scoring.get("trace_asset", {})
@@ -117,8 +152,16 @@ def run_writeback(record_id: str, project_dir: str) -> int:
         workspace.get("ai_review_result_path", "/workspace/ai_review_result.json"),
     )
 
+    # 读取评审表 record_id（由 pre_screen 创建）
+    review_record_id = None
+    review_id_path = os.path.join(os.path.dirname(ai_review_path), "review_record_id.txt")
+    if os.path.exists(review_id_path):
+        with open(review_id_path, "r") as f:
+            review_record_id = f.read().strip()
+
     print("===== 结果回填开始 =====")
-    print(f"Record ID: {record_id}")
+    print(f"Record ID (主表): {record_id}")
+    print(f"评审表 Record ID: {review_record_id or '(未找到)'}")
 
     # 1. 读取粗筛结果
     print("\n--- 读取粗筛结果 ---")
@@ -172,8 +215,8 @@ def run_writeback(record_id: str, project_dir: str) -> int:
     else:
         ai_status = "通过"
 
-    # 6. 回填飞书
-    print("\n--- 回填飞书 ---")
+    # 6. 评审表留痕
+    print("\n--- 评审表留痕 ---")
 
     # 专家能力分字段映射
     expert_dim_mapping = {
@@ -192,7 +235,7 @@ def run_writeback(record_id: str, project_dir: str) -> int:
         "compliance": "compliance_score",
     }
 
-    update_fields = {
+    review_fields = {
         fm.get("ai_review_status", "AI评审状态"): ai_status,
         fm.get("ai_review_result", "AI评审结果"): json.dumps(ai_result, ensure_ascii=False, indent=2),
         fm.get("final_conclusion", "最终结论"): conclusion,
@@ -205,25 +248,63 @@ def run_writeback(record_id: str, project_dir: str) -> int:
         key = dim["key"]
         logical_name = expert_dim_mapping.get(key, f"{key}_score")
         feishu_field = fm.get(logical_name, key)
-        update_fields[feishu_field] = expert_scores[key]
+        review_fields[feishu_field] = expert_scores[key]
 
     # Trace 资产六子维度
     for dim in trace_dims:
         key = dim["key"]
         logical_name = trace_dim_mapping.get(key, f"{key}_score")
         feishu_field = fm.get(logical_name, key)
-        update_fields[feishu_field] = trace_scores[key]
+        review_fields[feishu_field] = trace_scores[key]
+
+    if review_record_id:
+        try:
+            client.update_review_record(review_record_id, review_fields)
+            print("评审表留痕成功")
+            for k, v in review_fields.items():
+                if k == fm.get("ai_review_result", "AI评审结果"):
+                    print(f"  {k}: (JSON, {len(str(v))} 字符)")
+                else:
+                    print(f"  {k}: {v}")
+        except Exception as e:
+            print(f"评审表留痕失败: {e}", file=sys.stderr)
+    else:
+        # 如果没有评审表 record_id，创建新记录
+        try:
+            review_record = client.create_review_record(review_fields)
+            review_record_id = review_record.get("record_id")
+            print(f"评审表留痕成功 (新建), record_id={review_record_id}")
+        except Exception as e:
+            print(f"评审表留痕失败: {e}", file=sys.stderr)
+
+    # 7. 主表回填（审核状态 + 机审说明）
+    print("\n--- 主表回填 ---")
+
+    # 结论 → 主表审核状态映射
+    if conclusion == "拒绝":
+        main_status = conclusion_map.get("reject", "已拒绝")
+    elif "待人工复核" in conclusion:
+        main_status = conclusion_map.get("manual_review", "初审中")
+    else:
+        # "可储备专家" / "高价值trace" / 两者兼有
+        main_status = conclusion_map.get("pass", "最终审核通过")
+
+    # 组装机审说明
+    machine_note = _build_machine_note(conclusion, expert_scores, trace_scores, ai_result)
+
+    review_status_field = mfm.get("review_status", "审核状态")
+    machine_note_field = mfm.get("machine_review_note", "机审说明")
 
     try:
-        client.update_record(record_id, update_fields)
-        print("飞书回填成功")
-        for k, v in update_fields.items():
-            if k == fm.get("ai_review_result", "AI评审结果"):
-                print(f"  {k}: (JSON, {len(str(v))} 字符)")
-            else:
-                print(f"  {k}: {v}")
+        client.update_main_record(record_id, {
+            review_status_field: main_status,
+            machine_note_field: machine_note,
+        })
+        print(f"主表回填成功:")
+        print(f"  {review_status_field}: {main_status}")
+        print(f"  {machine_note_field}: ({len(machine_note)} 字符)")
     except Exception as e:
-        print(f"飞书回填失败: {e}", file=sys.stderr)
+        print(f"主表回填失败: {e}", file=sys.stderr)
         return 1
 
     print(f"\n===== 结果回填完成 =====")
@@ -232,7 +313,7 @@ def run_writeback(record_id: str, project_dir: str) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description="专家考核产物结果回填")
-    parser.add_argument("--record-id", required=True, help="飞书多维表格 record_id")
+    parser.add_argument("--record-id", required=True, help="主表 record_id")
     parser.add_argument("--project-dir", required=True, help="项目目录路径")
     args = parser.parse_args()
 

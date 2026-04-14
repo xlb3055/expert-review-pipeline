@@ -5,7 +5,12 @@
 第一层：7 项硬门槛初筛
 
 直接在火山流水线中执行（不需要 Daytona），速度快（2-3 秒）。
-执行 7 项硬性校验，结果回填飞书多维表格。
+执行 7 项硬性校验。
+
+数据流：
+  - 从主表读取数据（record_id 是主表的 record_id）
+  - 评审表创建留痕记录（粗筛状态+详情）
+  - 主表回填审核状态（仅拒绝时）
 
 退出码:
   0 = 通过（继续 AI 评审）
@@ -23,11 +28,12 @@ import os
 import re
 import sys
 
-from core.config_loader import load_project_config, get_field_name
+from core.config_loader import load_project_config, get_field_name, get_main_field_name
 from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
     extract_attachment_file_token,
+    extract_attachment_url,
     extract_link_url,
 )
 from core.trace_parser import TraceAnalysis, parse_trace_file
@@ -150,23 +156,41 @@ def check_tool_loop_exists(trace: TraceAnalysis) -> dict:
     }
 
 
-def check_final_product_exists(fields: dict, product_field: str,
-                                attachment_field: str) -> dict:
-    """检查 4: 最终产物链接或附件不为空。"""
-    link = extract_link_url(fields.get(product_field, ""))
-    attachment = extract_attachment_file_token(fields.get(attachment_field))
+def check_final_product_exists(fields: dict, product_field: str) -> dict:
+    """检查 4: 最终产物不为空（主表是附件类型，也可能是链接）。"""
+    product_value = fields.get(product_field, "")
 
-    if link or attachment:
-        source = "链接" if link else "附件"
+    # 检查附件类型
+    attachment = extract_attachment_file_token(product_value)
+    if attachment:
         return {
             "check": "final_product_exists",
             "passed": True,
-            "detail": f"最终产物存在（{source}）",
+            "detail": "最终产物存在（附件）",
         }
+
+    # 检查链接类型
+    link = extract_link_url(product_value)
+    if link:
+        return {
+            "check": "final_product_exists",
+            "passed": True,
+            "detail": "最终产物存在（链接）",
+        }
+
+    # 检查文本类型（非空字符串）
+    text = normalize_field_value(product_value)
+    if text.strip():
+        return {
+            "check": "final_product_exists",
+            "passed": True,
+            "detail": "最终产物存在（文本）",
+        }
+
     return {
         "check": "final_product_exists",
         "passed": False,
-        "detail": "最终产物链接和附件均为空，请提供其中一项",
+        "detail": "最终产物字段为空，请提供最终产物",
         "action": "reject",
     }
 
@@ -277,11 +301,13 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     """
     执行粗筛流程。
 
+    record_id: 主表的 record_id
     返回退出码: 0=通过, 1=拒绝, 2=待复核, 3=系统错误
     """
     config = load_project_config(project_dir)
     client = FeishuClient.from_config(config)
     fm = config.get("field_mapping", {})
+    mfm = config.get("main_field_mapping", {})
     pre_cfg = config.get("pre_screen", {})
     workspace = config.get("workspace", {})
 
@@ -297,23 +323,23 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     min_desc_len = pre_cfg.get("min_task_description_length", 50)
 
     print("===== 硬门槛初筛开始 =====")
-    print(f"Record ID: {record_id}")
+    print(f"Record ID (主表): {record_id}")
 
-    # 1. 获取飞书记录
-    print("\n--- 获取飞书记录 ---")
-    record = client.get_record(record_id)
+    # 1. 从主表获取记录
+    print("\n--- 从主表获取记录 ---")
+    record = client.get_main_record(record_id)
     fields = record.get("fields", {})
 
     results = []
 
-    # 检查 1: 任务真实性
-    desc_field = get_field_name(config, "task_description")
+    # 检查 1: 任务真实性（主表字段: 任务说明）
+    desc_field = get_main_field_name(config, "task_description")
     check1 = check_task_authenticity(fields, desc_field, min_desc_len)
     results.append(check1)
     print(f"[检查1] task_authenticity: {'通过' if check1['passed'] else '不通过'} — {check1['detail']}")
 
     # 检查前先判断 Trace 附件是否存在，如存在则下载解析
-    trace_field_name = get_field_name(config, "trace_file")
+    trace_field_name = get_main_field_name(config, "trace_file")
     trace_field = fields.get(trace_field_name)
     file_token = extract_attachment_file_token(trace_field)
     trace = TraceAnalysis()  # 默认空
@@ -325,7 +351,10 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
         try:
-            client.download_attachment(file_token, trace_output_path)
+            # 优先使用附件自带的 url 下载
+            download_url = extract_attachment_url(trace_field)
+            client.download_attachment(file_token, trace_output_path,
+                                       download_url=download_url or None)
             trace = parse_trace_file(trace_output_path)
             print(f"Trace 解析结果: 轮次={trace.conversation_rounds}, 模型={trace.model_name}, "
                   f"工具调用={trace.tool_call_count}, 总行数={trace.total_lines}")
@@ -342,7 +371,7 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
                 "detail": f"Trace 下载失败: {e}",
                 "action": "reject",
             })
-            return _finalize(client, record_id, results, "拒绝", result_path, fm)
+            return _finalize(client, record_id, results, "拒绝", result_path, config)
 
     # 检查 2: Trace 完整性
     check2 = check_trace_integrity(fields, trace_field_name, trace, min_rounds)
@@ -354,10 +383,9 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     results.append(check3)
     print(f"[检查3] tool_loop_exists: {'通过' if check3['passed'] else '不通过'} — {check3['detail']}")
 
-    # 检查 4: 最终产物
-    product_field = get_field_name(config, "final_product")
-    attachment_field = get_field_name(config, "final_attachment")
-    check4 = check_final_product_exists(fields, product_field, attachment_field)
+    # 检查 4: 最终产物（主表字段: 最终产物，附件类型）
+    product_field = get_main_field_name(config, "final_product")
+    check4 = check_final_product_exists(fields, product_field)
     results.append(check4)
     print(f"[检查4] final_product_exists: {'通过' if check4['passed'] else '不通过'} — {check4['detail']}")
 
@@ -367,9 +395,11 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     print(f"[检查5] verification_exists: {'通过' if check5['passed'] else '不通过'} — {check5['detail']}")
 
     # 检查 6: Trace 与产物一致性
+    product_value = fields.get(product_field, "")
     has_product = bool(
-        extract_link_url(fields.get(product_field, ""))
-        or extract_attachment_file_token(fields.get(attachment_field))
+        extract_attachment_file_token(product_value)
+        or extract_link_url(product_value)
+        or normalize_field_value(product_value).strip()
     )
     check6 = check_trace_product_consistent(trace, has_product)
     results.append(check6)
@@ -385,16 +415,20 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     manual_review = [r for r in results if not r["passed"] and r.get("action") == "manual_review"]
 
     if rejected:
-        return _finalize(client, record_id, results, "拒绝", result_path, fm)
+        return _finalize(client, record_id, results, "拒绝", result_path, config)
     elif manual_review:
-        return _finalize(client, record_id, results, "待人工复核", result_path, fm)
+        return _finalize(client, record_id, results, "待人工复核", result_path, config)
     else:
-        return _finalize(client, record_id, results, "通过", result_path, fm)
+        return _finalize(client, record_id, results, "通过", result_path, config)
 
 
 def _finalize(client: FeishuClient, record_id: str, results: list, status: str,
-              result_path: str, field_mapping: dict) -> int:
-    """汇总结果、回填飞书、保存本地 JSON、返回退出码。"""
+              result_path: str, config: dict) -> int:
+    """汇总结果、评审表留痕、主表回填、保存本地 JSON、返回退出码。"""
+    fm = config.get("field_mapping", {})
+    mfm = config.get("main_field_mapping", {})
+    conclusion_map = config.get("conclusion_to_status", {})
+
     result_obj = {
         "粗筛状态": status,
         "checks": results,
@@ -410,20 +444,56 @@ def _finalize(client: FeishuClient, record_id: str, results: list, status: str,
         json.dump(result_obj, f, ensure_ascii=False, indent=2)
     print(f"\n粗筛结果已保存: {result_path}")
 
-    # 回填飞书
-    status_field = field_mapping.get("pre_screen_status", "粗筛状态")
-    detail_field = field_mapping.get("pre_screen_detail", "粗筛详情")
+    # -- 评审表留痕：创建一条记录 --
+    status_field = fm.get("pre_screen_status", "粗筛状态")
+    detail_field = fm.get("pre_screen_detail", "粗筛详情")
 
-    print(f"\n--- 回填飞书 (粗筛状态={status}) ---")
+    print(f"\n--- 评审表留痕 (粗筛状态={status}) ---")
+    review_record_id = None
     try:
-        update_fields = {
+        review_fields = {
             status_field: status,
             detail_field: json.dumps(result_obj, ensure_ascii=False, indent=2),
         }
-        client.update_record(record_id, update_fields)
-        print("飞书回填成功")
+        review_record = client.create_review_record(review_fields)
+        review_record_id = review_record.get("record_id")
+        print(f"评审表留痕成功, record_id={review_record_id}")
+
+        # 保存评审表 record_id 供后续阶段使用
+        if review_record_id:
+            review_id_path = os.path.join(os.path.dirname(result_path), "review_record_id.txt")
+            with open(review_id_path, "w") as f:
+                f.write(review_record_id)
     except Exception as e:
-        print(f"飞书回填失败: {e}", file=sys.stderr)
+        print(f"评审表留痕失败（非致命）: {e}", file=sys.stderr)
+
+    # -- 主表回填 --
+    review_status_field = mfm.get("review_status", "审核状态")
+    machine_note_field = mfm.get("machine_review_note", "机审说明")
+
+    if status == "拒绝":
+        # 粗筛拒绝 → 主表直接标记已拒绝
+        print("\n--- 主表回填（粗筛拒绝） ---")
+        reject_reasons = [r["detail"] for r in results if not r["passed"] and r.get("action") == "reject"]
+        machine_note = "【粗筛拒绝】\n" + "\n".join(f"- {r}" for r in reject_reasons)
+        try:
+            client.update_main_record(record_id, {
+                review_status_field: conclusion_map.get("reject", "已拒绝"),
+                machine_note_field: machine_note,
+            })
+            print("主表回填成功")
+        except Exception as e:
+            print(f"主表回填失败: {e}", file=sys.stderr)
+    elif status == "通过":
+        # 粗筛通过 → 主表标记初审中
+        print("\n--- 主表回填（粗筛通过，进入AI评审） ---")
+        try:
+            client.update_main_record(record_id, {
+                review_status_field: conclusion_map.get("manual_review", "初审中"),
+            })
+            print("主表回填成功")
+        except Exception as e:
+            print(f"主表回填失败（非致命）: {e}", file=sys.stderr)
 
     print(f"\n===== 硬门槛初筛结束: {status} =====")
 
@@ -437,7 +507,7 @@ def _finalize(client: FeishuClient, record_id: str, results: list, status: str,
 
 def main():
     parser = argparse.ArgumentParser(description="专家考核产物硬门槛初筛")
-    parser.add_argument("--record-id", required=True, help="飞书多维表格 record_id")
+    parser.add_argument("--record-id", required=True, help="主表 record_id")
     parser.add_argument("--project-dir", required=True, help="项目目录路径")
     args = parser.parse_args()
 

@@ -3,8 +3,15 @@ project:
   description: "专家考核产物自动审核"
 
 feishu:
-  app_token: ""   # 留空 = 使用环境变量
-  table_id: ""
+  # 主表 — 数据源 + 最终回填
+  main_app_token: "TdiNb881Ja89b9s6FwNcOH1Vn4c"
+  main_table_id: "tblE2Qdot3No2kUC"
+  # 评审表 — 留痕
+  review_app_token: "INiPbaSwsaKCffszIDwc1dYPnph"
+  review_table_id: "tblzyPQ33dOle6lY"
+  # 凭证（从环境变量读取）
+  app_id: ""
+  app_secret: ""
 
 stages:
   - name: pre_screen
@@ -54,26 +61,28 @@ scoring:
       - { key: verification_loop, max_score: 2 }
       - { key: compliance, max_score: 2 }
 
-field_mapping:
-  # 输入字段（不变）
-  trace_file: "Trace文件"
-  task_description: "任务描述"
-  expert_name: "专家姓名"
-  expert_id: "专家ID"
+# 主表字段映射（主表字段名 → 逻辑名）
+main_field_mapping:
+  task_description: "任务说明"
+  trace_file: "Trace 文件"
+  expert_name: "提交人"         # 主表是 person 类型
+  expert_id: "talent_id"       # 主表是 lookup 类型
   position: "岗位方向"
-  final_product: "最终产物"
-  final_attachment: "最终附件"
-  # 输出字段
+  final_product: "最终产物"      # 主表是附件类型
+  original_product: "原始产物"
+  review_status: "审核状态"      # 回填目标
+  machine_review_note: "机审说明" # 回填目标
+
+# 评审表字段映射（留痕用）
+field_mapping:
   pre_screen_status: "粗筛状态"
   pre_screen_detail: "粗筛详情"
   ai_review_status: "AI评审状态"
   ai_review_result: "AI评审结果"
-  # 专家能力分
   task_complexity_score: "任务复杂度"
   iteration_quality_score: "迭代质量"
   professional_judgment_score: "专业判断"
   expert_ability_total: "总分"
-  # Trace 资产分（新增字段）
   trace_asset_total: "Trace资产总分"
   authenticity_score: "真实性"
   info_density_score: "信息密度"
@@ -81,8 +90,13 @@ field_mapping:
   correction_value_score: "纠偏价值"
   verification_loop_score: "验证闭环"
   compliance_score: "合规可用性"
-  # 最终结论
   final_conclusion: "最终结论"
+
+# 主表审核状态映射
+conclusion_to_status:
+  pass: "最终审核通过"
+  manual_review: "初审中"
+  reject: "已拒绝"
 
 pre_screen:
   min_conversation_rounds: 3
