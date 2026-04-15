@@ -298,7 +298,8 @@ def run_claude_in_sandbox(
                 # 内存/资源超限：清理所有同前缀的残留沙箱后重试
                 print(f"资源超限，尝试清理残留沙箱: {e}")
                 try:
-                    all_sandboxes = daytona.list()
+                    paginated = daytona.list()
+                    all_sandboxes = getattr(paginated, "items", paginated) or []
                     for sb in all_sandboxes:
                         sb_name = getattr(sb, "name", "") or ""
                         if sb_name.startswith(config.sandbox_name_prefix):
