@@ -200,20 +200,12 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
 
     # 6. 调用 AI 评审
     # 优先 Daytona 沙箱（免费），失败自动回退直连 API
-    # 已在沙箱内（/workspace/ 路径）时跳过嵌套沙箱，直接调 API
     # AI_REVIEW_MODE=api 可强制跳过沙箱
     mode = os.environ.get("AI_REVIEW_MODE", "").lower()
-    in_sandbox = (
-        os.environ.get("DAYTONA_SANDBOX_ID", "")       # Daytona 注入的环境变量
-        or os.path.abspath(project_dir).startswith("/workspace")  # 工作目录在 /workspace 下
-    )
-    can_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "") and not in_sandbox
+    can_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
     can_api = bool(os.environ.get("OPENROUTER_API_KEY", ""))
     result_obj = None
     elapsed = 0
-
-    if in_sandbox:
-        print("检测到已在 Daytona 沙箱内，跳过嵌套沙箱，直接调 API")
 
     if mode != "api" and can_daytona:
         print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")

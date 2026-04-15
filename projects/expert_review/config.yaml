@@ -38,7 +38,7 @@ ai_review:
   sandbox_snapshot: "daytona-medium"
   sandbox_resources:
     cpu: 2
-    memory: 4
+    memory: 2
     disk: 5
 
 scoring:

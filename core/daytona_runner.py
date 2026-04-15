@@ -285,7 +285,8 @@ def run_claude_in_sandbox(
         try:
             sandbox = daytona.create(create_params, timeout=0)
         except DaytonaError as e:
-            if "already exists" in str(e).lower():
+            err_msg = str(e).lower()
+            if "already exists" in err_msg:
                 print(f"沙箱名已存在，删除后重试: {e}")
                 try:
                     daytona.delete(daytona.get(sandbox_name))
@@ -293,6 +294,23 @@ def run_claude_in_sandbox(
                 except Exception:
                     pass
                 sandbox = daytona.create(create_params, timeout=0)
+            elif "memory limit" in err_msg or "resource" in err_msg:
+                # 内存/资源超限：清理所有同前缀的残留沙箱后重试
+                print(f"资源超限，尝试清理残留沙箱: {e}")
+                try:
+                    all_sandboxes = daytona.list()
+                    for sb in all_sandboxes:
+                        sb_name = getattr(sb, "name", "") or ""
+                        if sb_name.startswith(config.sandbox_name_prefix):
+                            print(f"  清理残留沙箱: {sb_name}")
+                            try:
+                                daytona.delete(sb)
+                            except Exception:
+                                pass
+                    time.sleep(3)
+                    sandbox = daytona.create(create_params, timeout=0)
+                except Exception as retry_err:
+                    raise DaytonaError(f"清理后重试仍失败: {retry_err}") from e
             else:
                 raise
 
