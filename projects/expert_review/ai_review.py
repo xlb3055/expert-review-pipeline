@@ -199,17 +199,15 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     schema_content = schema_file.read_text(encoding="utf-8")
 
     # 6. 调用 AI 评审
-    # AI_REVIEW_MODE=daytona 强制走沙箱；=api 强制直连；默认有 OPENROUTER_API_KEY 就直连
+    # 默认优先 Daytona 沙箱（免费），失败自动回退直连 API
+    # AI_REVIEW_MODE=api 可强制跳过沙箱
     mode = os.environ.get("AI_REVIEW_MODE", "").lower()
-    if mode == "daytona":
-        use_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
-    elif mode == "api":
-        use_daytona = False
-    else:
-        # 默认：有 OpenRouter key 就直连（更快），否则回退 Daytona
-        use_daytona = (not os.environ.get("OPENROUTER_API_KEY", "")) and _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
+    can_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
+    can_api = bool(os.environ.get("OPENROUTER_API_KEY", ""))
+    result_obj = None
+    elapsed = 0
 
-    if use_daytona:
+    if mode != "api" and can_daytona:
         print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")
         sandbox_res = ai_cfg.get("sandbox_resources", {})
         run_config = DaytonaRunConfig(
@@ -224,16 +222,27 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
             timeout=int(os.environ.get("CLAUDE_TIMEOUT", str(ai_cfg.get("timeout", 600)))),
         )
         result = run_claude_in_sandbox(run_config, prompt_content, schema_content, input_text)
-        if not result.success:
-            print(f"AI 评审失败: {result.error}", file=sys.stderr)
-            _save_error_result(result.error, result_path)
-            return 1
-        result_obj = result.result_json
-        elapsed = result.elapsed_seconds
-    else:
+        if result.success:
+            result_obj = result.result_json
+            elapsed = result.elapsed_seconds
+        else:
+            print(f"Daytona 沙箱失败: {result.error}", file=sys.stderr)
+            if can_api:
+                print("自动回退直连 API ...")
+            else:
+                print("无 OPENROUTER_API_KEY，无法回退", file=sys.stderr)
+                _save_error_result(result.error, result_path)
+                return 1
+
+    if result_obj is None and can_api:
         print(f"\n--- 直连 API --- [{time.time()-t0:.1f}s]")
         result_obj = _call_api_direct(prompt_content, schema_content, input_text, model)
         elapsed = time.time() - t0
+
+    if result_obj is None:
+        print("错误: 无可用的 AI 评审通道（需要 DAYTONA_API_KEY 或 OPENROUTER_API_KEY）", file=sys.stderr)
+        _save_error_result("无可用评审通道", result_path)
+        return 1
 
     # 7. 解包 schema 包装
     if "expert_review_result" in result_obj and "expert_ability" not in result_obj:
