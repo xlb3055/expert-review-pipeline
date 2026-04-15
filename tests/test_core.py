@@ -381,21 +381,25 @@ class TestExpertReviewConfig(unittest.TestCase):
         self.assertIn("ai_review", config)
         self.assertIn("scoring", config)
         self.assertIn("field_mapping", config)
-        self.assertIn("pre_screen", config)
         self.assertIn("workspace", config)
+        # 新格式
+        self.assertIn("data_source", config)
+        self.assertIn("data_sink", config)
 
     def test_stages_have_required_fields(self):
         config = self._load_config()
         for stage in config["stages"]:
             self.assertIn("name", stage, f"stage 缺少 name: {stage}")
-            self.assertIn("script", stage, f"stage 缺少 script: {stage}")
-            # exit_code_handling 可选，pipeline_runner 有默认策略
+            has_executor = "script" in stage or "processor" in stage
+            self.assertTrue(has_executor, f"stage 缺少 script 或 processor: {stage}")
 
     def test_stages_scripts_exist(self):
-        """所有 stage 引用的脚本文件必须存在"""
+        """所有 script 模式的 stage 引用的脚本文件必须存在"""
         config = self._load_config()
         project_dir = os.path.join(os.path.dirname(__file__), "..", "projects", "expert_review")
         for stage in config["stages"]:
+            if "script" not in stage:
+                continue  # processor 模式不需要脚本文件
             script_path = os.path.join(project_dir, stage["script"])
             self.assertTrue(
                 os.path.isfile(script_path),
@@ -425,28 +429,16 @@ class TestExpertReviewConfig(unittest.TestCase):
         trace_max = sum(d["max_score"] for d in trace_dims)
         self.assertEqual(trace_max, 12)
 
-    def test_field_mapping_completeness(self):
-        """field_mapping 应覆盖所有业务需要的逻辑字段"""
+    def test_field_mapping_has_basic_fields(self):
+        """field_mapping 应包含基本的逻辑字段"""
         config = self._load_config()
         fm = config["field_mapping"]
-        required_logical_names = [
-            # 输入字段
+        basic_fields = [
             "trace_file", "task_description", "expert_name", "expert_id",
-            "position", "final_product", "final_attachment",
-            # 输出字段
-            "pre_screen_status", "pre_screen_detail",
-            "ai_review_status", "ai_review_result",
-            # 专家能力分
-            "task_complexity_score", "iteration_quality_score",
-            "professional_judgment_score", "expert_ability_total",
-            # Trace 资产分
-            "trace_asset_total", "authenticity_score", "info_density_score",
-            "tool_loop_score", "correction_value_score",
-            "verification_loop_score", "compliance_score",
-            # 最终结论
-            "final_conclusion",
+            "position", "final_product", "review_status",
+            "machine_review_note", "machine_review_remark",
         ]
-        for name in required_logical_names:
+        for name in basic_fields:
             self.assertIn(name, fm, f"field_mapping 缺少: {name}")
             self.assertTrue(fm[name], f"field_mapping['{name}'] 为空")
 
@@ -464,16 +456,22 @@ class TestExpertReviewConfig(unittest.TestCase):
         config = self._load_config()
         stages = {s["name"]: s for s in config["stages"]}
 
-        # pre_screen: 0=continue, 1=stop, 2=continue (原 bash: 0→继续, 1→结束, 2→继续)
+        # pre_screen: 0=continue, 1=continue, 2=continue（拒绝也继续，确保 writeback 执行）
         ps = stages["pre_screen"]["exit_code_handling"]
         self.assertEqual(ps[0], "continue")
-        self.assertEqual(ps[1], "stop")
+        self.assertEqual(ps[1], "continue")
         self.assertEqual(ps[2], "continue")
 
-        # ai_review: 0=continue, 1=continue (原 bash: 失败不致命)
+        # ai_review: 0=continue, 1=continue
         ai = stages["ai_review"]["exit_code_handling"]
         self.assertEqual(ai[0], "continue")
         self.assertEqual(ai[1], "continue")
+
+        # 验证 stages 结构: 2 processor + 3 script
+        processor_stages = [s for s in config["stages"] if s.get("processor")]
+        script_stages = [s for s in config["stages"] if s.get("script")]
+        self.assertEqual(len(processor_stages), 2)
+        self.assertEqual(len(script_stages), 3)
 
 
 if __name__ == "__main__":

@@ -3,33 +3,87 @@ project:
   description: "专家考核产物自动审核"
 
 feishu:
-  # 凭证（从环境变量读取）
   app_id: ""
   app_secret: ""
-  # 主表 — 数据源 + 最终回填
   app_token: "TdiNb881Ja89b9s6FwNcOH1Vn4c"
   table_id: "tblE2Qdot3No2kUC"
 
+# 数据入口：声明式字段映射（逻辑名 → 飞书物理字段名）
+data_source:
+  type: feishu_record
+  fields:
+    task_description: "任务说明"
+    trace_file: "Trace 文件"
+    expert_name: "提交人"
+    expert_id: "talent_id"
+    position: "岗位方向"
+    final_product: "最终产物"
+    original_product: "原始产物"
+    review_status: "审核状态"
+
+# 数据出口：结果键 → 飞书物理字段名
+data_sink:
+  type: feishu_record
+  field_mapping:
+    machine_review_note: "机审说明"
+    machine_review_remark: "机审备注"
+    review_status: "审核状态"
+  status_mapping:
+    pass: "最终审核通过"
+    manual_review: "初审中"
+    reject: "已拒绝"
+
+# Pipeline 阶段编排
+# feishu_fetch / feishu_writeback 是通用 processor（配置驱动）
+# 中间阶段是业务脚本（通过 ctx_data.json 读写数据）
 stages:
+  - name: fetch_data
+    processor: feishu_fetch
+    description: "拉取飞书记录"
+
   - name: pre_screen
     script: pre_screen.py
     description: "脚本粗筛"
     exit_code_handling:
       0: continue
-      1: stop
+      1: continue
       2: continue
+
   - name: ai_review
     script: ai_review.py
     description: "AI 评审"
     exit_code_handling:
       0: continue
-      1: continue   # 失败不致命
+      1: continue
+
   - name: writeback
     script: writeback.py
-    description: "结果回填"
-    exit_code_handling:
-      0: continue
+    description: "算分 + 拼结论 + 生成机审说明"
 
+  - name: sync
+    processor: feishu_writeback
+    description: "结果回填飞书"
+
+# 评分配置
+scoring:
+  pass_score: 70
+  expert_ability:
+    max_total: 10
+    dimensions:
+      - { key: task_complexity, max_score: 3, label: "任务复杂度" }
+      - { key: iteration_quality, max_score: 3, label: "迭代质量" }
+      - { key: professional_judgment, max_score: 4, label: "专业判断" }
+  trace_asset:
+    max_total: 12
+    dimensions:
+      - { key: authenticity, max_score: 2, label: "真实性" }
+      - { key: info_density, max_score: 2, label: "信息密度" }
+      - { key: tool_loop, max_score: 2, label: "工具闭环" }
+      - { key: correction_value, max_score: 2, label: "纠偏价值" }
+      - { key: verification_loop, max_score: 2, label: "验证闭环" }
+      - { key: compliance, max_score: 2, label: "合规可用性" }
+
+# AI 评审全局配置（可被 stage config 覆盖）
 ai_review:
   prompt_file: prompt.md
   schema_file: schema.json
@@ -41,39 +95,19 @@ ai_review:
     memory: 2
     disk: 5
 
-scoring:
-  # 综合分 = 能力分百分比 * 50% + 资产分百分比 * 50%，>= pass_score 为通过
-  pass_score: 70
-  expert_ability:
-    max_total: 10
-    dimensions:
-      - { key: task_complexity, max_score: 3 }
-      - { key: iteration_quality, max_score: 3 }
-      - { key: professional_judgment, max_score: 4 }
-  trace_asset:
-    max_total: 12
-    dimensions:
-      - { key: authenticity, max_score: 2 }
-      - { key: info_density, max_score: 2 }
-      - { key: tool_loop, max_score: 2 }
-      - { key: correction_value, max_score: 2 }
-      - { key: verification_loop, max_score: 2 }
-      - { key: compliance, max_score: 2 }
-
-# 字段映射（逻辑名 → 实际飞书字段名）
+# 向后兼容：保留旧字段映射（field_mapping）
 field_mapping:
   task_description: "任务说明"
   trace_file: "Trace 文件"
-  expert_name: "提交人"         # 主表是 person 类型
-  expert_id: "talent_id"       # 主表是 lookup 类型
+  expert_name: "提交人"
+  expert_id: "talent_id"
   position: "岗位方向"
-  final_product: "最终产物"      # 主表是附件类型
+  final_product: "最终产物"
   original_product: "原始产物"
-  review_status: "审核状态"      # 回填目标
-  machine_review_note: "机审说明" # 回填目标（详细逐维度解析）
-  machine_review_remark: "机审备注" # 回填目标（结论 + 给专家看的人话反馈）
+  review_status: "审核状态"
+  machine_review_note: "机审说明"
+  machine_review_remark: "机审备注"
 
-# 主表审核状态映射
 conclusion_to_status:
   pass: "最终审核通过"
   manual_review: "初审中"
@@ -83,6 +117,7 @@ pre_screen:
   min_conversation_rounds: 3
 
 workspace:
+  base_dir: "/workspace"
   trace_path: "/workspace/trace.jsonl"
   pre_screen_result_path: "/workspace/pre_screen_result.json"
   ai_review_result_path: "/workspace/ai_review_result.json"

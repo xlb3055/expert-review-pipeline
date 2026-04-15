@@ -6,9 +6,9 @@ pipeline_runner 编排测试 + 业务脚本端到端测试（mock Feishu）
 
 验证:
 1. pipeline_runner 能正确读 config、按序执行 stage、处理退出码
-2. pre_screen 的 7 项硬门槛检查逻辑在 mock 数据下能完整跑通
-3. writeback 的双模块评分提取和新结论判定逻辑正确
-4. ai_review 的输入组装和 config 读取正确
+2. pre_screen 的 7 项硬门槛检查逻辑
+3. writeback 的双模块评分提取和结论判定逻辑
+4. ai_review 的输入组装
 """
 
 import json
@@ -35,6 +35,7 @@ class TestPipelineRunner(unittest.TestCase):
         """
         import yaml
         tmpdir = tempfile.mkdtemp()
+        workspace = tempfile.mkdtemp()
 
         config = {
             "project": {"name": "test_pipeline"},
@@ -44,6 +45,7 @@ class TestPipelineRunner(unittest.TestCase):
             },
             "stages": stages,
             "field_mapping": {},
+            "workspace": {"base_dir": workspace},
         }
         with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
             yaml.dump(config, f, allow_unicode=True)
@@ -60,9 +62,9 @@ class TestPipelineRunner(unittest.TestCase):
         from core.pipeline_runner import run_pipeline
 
         scripts = {
-            "stage1.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.parse_args()\nsys.exit(0)",
-            "stage2.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.parse_args()\nsys.exit(0)",
-            "stage3.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.parse_args()\nsys.exit(0)",
+            "stage1.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.add_argument('--ctx-data-file', required=False)\np.parse_args()\nsys.exit(0)",
+            "stage2.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.add_argument('--ctx-data-file', required=False)\np.parse_args()\nsys.exit(0)",
+            "stage3.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.add_argument('--ctx-data-file', required=False)\np.parse_args()\nsys.exit(0)",
         }
         stages = [
             {"name": "s1", "script": "stage1.py", "exit_code_handling": {0: "continue"}},
@@ -70,7 +72,9 @@ class TestPipelineRunner(unittest.TestCase):
             {"name": "s3", "script": "stage3.py", "exit_code_handling": {0: "continue"}},
         ]
         tmpdir = self._make_project(stages, scripts)
-        result = run_pipeline(tmpdir, "test_record")
+        with patch("core.processors.FeishuClient") as MockClient:
+            MockClient.from_config.return_value = MagicMock()
+            result = run_pipeline(tmpdir, "test_record")
         self.assertEqual(result, 0)
 
     def test_stop_action_skips_remaining(self):
@@ -78,48 +82,52 @@ class TestPipelineRunner(unittest.TestCase):
         from core.pipeline_runner import run_pipeline
 
         scripts = {
-            "stage1.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.parse_args()\nsys.exit(1)",
-            "stage2.py": "import sys; sys.exit(99)",  # 不应被执行
+            "stage1.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.add_argument('--ctx-data-file', required=False)\np.parse_args()\nsys.exit(1)",
+            "stage2.py": "import sys; sys.exit(99)",
         }
         stages = [
             {"name": "s1", "script": "stage1.py", "exit_code_handling": {0: "continue", 1: "stop"}},
             {"name": "s2", "script": "stage2.py", "exit_code_handling": {0: "continue"}},
         ]
         tmpdir = self._make_project(stages, scripts)
-        result = run_pipeline(tmpdir, "test_record")
-        self.assertEqual(result, 0)  # stop 是正常结束
+        with patch("core.processors.FeishuClient") as MockClient:
+            MockClient.from_config.return_value = MagicMock()
+            result = run_pipeline(tmpdir, "test_record")
+        self.assertEqual(result, 0)
 
     def test_error_action_fails_pipeline(self):
         """stage1 返回非预期退出码，默认策略 → error"""
         from core.pipeline_runner import run_pipeline
 
         scripts = {
-            "stage1.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.parse_args()\nsys.exit(3)",
+            "stage1.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.add_argument('--ctx-data-file', required=False)\np.parse_args()\nsys.exit(3)",
         }
         stages = [
             {"name": "s1", "script": "stage1.py", "exit_code_handling": {0: "continue"}},
-            # exit_code 3 没有映射 → 走默认 error
         ]
         tmpdir = self._make_project(stages, scripts)
-        result = run_pipeline(tmpdir, "test_record")
-        self.assertEqual(result, 1)  # 流水线失败
+        with patch("core.processors.FeishuClient") as MockClient:
+            MockClient.from_config.return_value = MagicMock()
+            result = run_pipeline(tmpdir, "test_record")
+        self.assertEqual(result, 1)
 
     def test_continue_after_non_zero(self):
         """stage1 返回 1 但配置为 continue，stage2 应该执行"""
         from core.pipeline_runner import run_pipeline
 
-        # 用 marker 文件证明 stage2 被执行了
         marker = tempfile.mktemp()
         scripts = {
-            "stage1.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.parse_args()\nsys.exit(1)",
-            "stage2.py": f"import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.parse_args()\nopen('{marker}', 'w').write('executed')\nsys.exit(0)",
+            "stage1.py": "import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.add_argument('--ctx-data-file', required=False)\np.parse_args()\nsys.exit(1)",
+            "stage2.py": f"import sys, argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.add_argument('--ctx-data-file', required=False)\np.parse_args()\nopen('{marker}', 'w').write('executed')\nsys.exit(0)",
         }
         stages = [
             {"name": "s1", "script": "stage1.py", "exit_code_handling": {0: "continue", 1: "continue"}},
             {"name": "s2", "script": "stage2.py", "exit_code_handling": {0: "continue"}},
         ]
         tmpdir = self._make_project(stages, scripts)
-        result = run_pipeline(tmpdir, "test_record")
+        with patch("core.processors.FeishuClient") as MockClient:
+            MockClient.from_config.return_value = MagicMock()
+            result = run_pipeline(tmpdir, "test_record")
         self.assertEqual(result, 0)
         self.assertTrue(os.path.exists(marker), "stage2 应该被执行")
         os.unlink(marker)
@@ -132,38 +140,49 @@ class TestPipelineRunner(unittest.TestCase):
             {"name": "missing", "script": "nonexistent.py", "exit_code_handling": {0: "continue"}},
         ]
         tmpdir = self._make_project(stages)
-        result = run_pipeline(tmpdir, "test_record")
+        with patch("core.processors.FeishuClient") as MockClient:
+            MockClient.from_config.return_value = MagicMock()
+            result = run_pipeline(tmpdir, "test_record")
         self.assertEqual(result, 1)
 
     def test_no_stages_fails(self):
         """config 中无 stages 应返回错误"""
         from core.pipeline_runner import run_pipeline
         tmpdir = self._make_project([])
+        # no_stages 会在 ctx 创建前就返回 1
         result = run_pipeline(tmpdir, "test_record")
         self.assertEqual(result, 1)
 
     def test_stage_receives_correct_args(self):
-        """验证 pipeline_runner 传递的 --record-id 和 --project-dir 正确"""
+        """验证 pipeline_runner 传递 --record-id, --project-dir, --ctx-data-file"""
         marker = tempfile.mktemp()
         script_code = textwrap.dedent(f"""\
             import argparse, json
             p = argparse.ArgumentParser()
             p.add_argument('--record-id')
             p.add_argument('--project-dir')
+            p.add_argument('--ctx-data-file')
             args = p.parse_args()
             with open('{marker}', 'w') as f:
-                json.dump({{'record_id': args.record_id, 'project_dir': args.project_dir}}, f)
+                json.dump({{
+                    'record_id': args.record_id,
+                    'project_dir': args.project_dir,
+                    'has_ctx_data': args.ctx_data_file is not None,
+                }}, f)
         """)
         stages = [{"name": "check_args", "script": "check.py", "exit_code_handling": {0: "continue"}}]
         tmpdir = self._make_project(stages, {"check.py": script_code})
 
         from core.pipeline_runner import run_pipeline
-        run_pipeline(tmpdir, "my_record_123")
+        with patch("core.processors.FeishuClient") as MockClient:
+            MockClient.from_config.return_value = MagicMock()
+            run_pipeline(tmpdir, "my_record_123")
 
         with open(marker) as f:
             data = json.load(f)
         self.assertEqual(data["record_id"], "my_record_123")
         self.assertEqual(data["project_dir"], tmpdir)
+        self.assertTrue(data["has_ctx_data"])
         os.unlink(marker)
 
 
@@ -178,33 +197,24 @@ class TestPreScreenLogic(unittest.TestCase):
 
     def test_task_authenticity_pass(self):
         from projects.expert_review.pre_screen import check_task_authenticity
-        fields = {"任务描述": "这是一段足够长的任务描述，涉及真实的业务场景和技术实现细节" * 2}
-        result = check_task_authenticity(fields, "任务描述", 50)
+        result = check_task_authenticity("这是一段足够长的任务描述，涉及真实的业务场景和技术实现细节")
         self.assertTrue(result["passed"])
 
-    def test_task_authenticity_too_short(self):
+    def test_task_authenticity_empty(self):
         from projects.expert_review.pre_screen import check_task_authenticity
-        fields = {"任务描述": "太短"}
-        result = check_task_authenticity(fields, "任务描述", 50)
+        result = check_task_authenticity("")
         self.assertFalse(result["passed"])
         self.assertEqual(result["action"], "reject")
 
     def test_task_authenticity_demo_rejected(self):
         from projects.expert_review.pre_screen import check_task_authenticity
-        # 内容足够长但是纯 demo 关键词（需要长度也满足才会到关键词检查）
-        fields = {"任务描述": "hello world" + " " * 50}
-        result = check_task_authenticity(fields, "任务描述", 50)
-        # 长度满足后检查内容 — hello world 不会完全匹配因为有后续空格
-        # 用精确匹配测试
-        fields2 = {"任务描述": "hello world"}
-        result2 = check_task_authenticity(fields2, "任务描述", 5)
-        self.assertFalse(result2["passed"])
-        self.assertEqual(result2["action"], "reject")
+        result = check_task_authenticity("hello world")
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["action"], "reject")
 
     def test_task_authenticity_test_keyword_rejected(self):
         from projects.expert_review.pre_screen import check_task_authenticity
-        fields = {"任务描述": "测试"}
-        result = check_task_authenticity(fields, "任务描述", 2)
+        result = check_task_authenticity("测试")
         self.assertFalse(result["passed"])
 
     # --- 检查 2: trace_integrity ---
@@ -212,33 +222,30 @@ class TestPreScreenLogic(unittest.TestCase):
     def test_trace_integrity_pass(self):
         from projects.expert_review.pre_screen import check_trace_integrity
         from core.trace_parser import TraceAnalysis
-        fields = {"Trace文件": [{"file_token": "abc", "name": "trace.jsonl"}]}
         trace = TraceAnalysis(is_valid=True, conversation_rounds=5)
-        result = check_trace_integrity(fields, "Trace文件", trace, 3)
+        result = check_trace_integrity(True, trace, 3)
         self.assertTrue(result["passed"])
 
     def test_trace_integrity_no_attachment(self):
         from projects.expert_review.pre_screen import check_trace_integrity
         from core.trace_parser import TraceAnalysis
         trace = TraceAnalysis()
-        result = check_trace_integrity({}, "Trace文件", trace, 3)
+        result = check_trace_integrity(False, trace, 3)
         self.assertFalse(result["passed"])
         self.assertEqual(result["action"], "reject")
 
     def test_trace_integrity_invalid_trace(self):
         from projects.expert_review.pre_screen import check_trace_integrity
         from core.trace_parser import TraceAnalysis
-        fields = {"Trace文件": [{"file_token": "abc"}]}
         trace = TraceAnalysis(is_valid=False, errors=["解析失败"])
-        result = check_trace_integrity(fields, "Trace文件", trace, 3)
+        result = check_trace_integrity(True, trace, 3)
         self.assertFalse(result["passed"])
 
     def test_trace_integrity_low_rounds(self):
         from projects.expert_review.pre_screen import check_trace_integrity
         from core.trace_parser import TraceAnalysis
-        fields = {"Trace文件": [{"file_token": "abc"}]}
         trace = TraceAnalysis(is_valid=True, conversation_rounds=1)
-        result = check_trace_integrity(fields, "Trace文件", trace, 3)
+        result = check_trace_integrity(True, trace, 3)
         self.assertFalse(result["passed"])
 
     # --- 检查 3: tool_loop_exists ---
@@ -262,19 +269,17 @@ class TestPreScreenLogic(unittest.TestCase):
 
     def test_final_product_link(self):
         from projects.expert_review.pre_screen import check_final_product_exists
-        fields = {"最终产物": {"link": "https://example.com"}}
-        result = check_final_product_exists(fields, "最终产物", "最终附件")
+        result = check_final_product_exists({"link": "https://example.com"})
         self.assertTrue(result["passed"])
 
     def test_final_product_attachment(self):
         from projects.expert_review.pre_screen import check_final_product_exists
-        fields = {"最终附件": [{"file_token": "xyz"}]}
-        result = check_final_product_exists(fields, "最终产物", "最终附件")
+        result = check_final_product_exists([{"file_token": "xyz"}])
         self.assertTrue(result["passed"])
 
     def test_final_product_missing(self):
         from projects.expert_review.pre_screen import check_final_product_exists
-        result = check_final_product_exists({}, "最终产物", "最终附件")
+        result = check_final_product_exists(None)
         self.assertFalse(result["passed"])
         self.assertEqual(result["action"], "reject")
 
@@ -282,29 +287,18 @@ class TestPreScreenLogic(unittest.TestCase):
 
     def test_verification_exists_bash_tool(self):
         from projects.expert_review.pre_screen import check_verification_exists
-        trace = '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pytest tests/"}}]}}'
-        result = check_verification_exists(trace)
-        self.assertTrue(result["passed"])
-
-    def test_verification_exists_top_level_tool_use(self):
-        from projects.expert_review.pre_screen import check_verification_exists
-        trace = '{"type":"tool_use","name":"bash","input":{"command":"ls"}}'
-        result = check_verification_exists(trace)
+        result = check_verification_exists("[工具调用] Bash: pytest tests/")
         self.assertTrue(result["passed"])
 
     def test_verification_exists_no_bash(self):
-        """只有 Read/Edit/Write 不算验证类"""
         from projects.expert_review.pre_screen import check_verification_exists
-        trace = '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"path":"/tmp/a.py"}}]}}'
-        result = check_verification_exists(trace)
+        result = check_verification_exists("[工具调用] Read: /tmp/file.py")
         self.assertFalse(result["passed"])
         self.assertEqual(result["action"], "manual_review")
 
     def test_verification_exists_code_content_not_matched(self):
-        """代码内容中含 run/test 等关键词不应误报"""
         from projects.expert_review.pre_screen import check_verification_exists
-        trace = '{"type":"assistant","message":{"content":[{"type":"text","text":"run the test suite to verify"}]}}'
-        result = check_verification_exists(trace)
+        result = check_verification_exists("run the test suite to verify")
         self.assertFalse(result["passed"])
 
     # --- 检查 6: trace_product_consistent ---
@@ -328,43 +322,37 @@ class TestPreScreenLogic(unittest.TestCase):
 
     def test_compliance_pass(self):
         from projects.expert_review.pre_screen import check_compliance
-        trace = '{"type":"human","content":"请帮我实现一个缓存系统"}'
-        result = check_compliance(trace)
+        result = check_compliance("请帮我实现一个缓存系统")
         self.assertTrue(result["passed"])
 
     def test_compliance_secret_detected(self):
         from projects.expert_review.pre_screen import check_compliance
-        trace = 'using key sk-abcdefghijklmnopqrstuvwxyz1234567890 for auth'
-        result = check_compliance(trace)
+        result = check_compliance("using key sk-abcdefghijklmnopqrstuvwxyz1234567890 for auth")
         self.assertFalse(result["passed"])
         self.assertEqual(result["action"], "manual_review")
 
     def test_compliance_aws_key_detected(self):
         from projects.expert_review.pre_screen import check_compliance
-        trace = 'AKIAIOSFODNN7EXAMPLE in config'
-        result = check_compliance(trace)
+        result = check_compliance("AKIAIOSFODNN7EXAMPLE in config")
         self.assertFalse(result["passed"])
 
     def test_compliance_code_variable_not_flagged(self):
-        """代码中的变量赋值不应触发合规性告警"""
         from projects.expert_review.pre_screen import check_compliance
-        trace = 'const token = localStorage.getItem("auth_token");'
-        result = check_compliance(trace)
+        result = check_compliance('const token = localStorage.getItem("auth_token");')
         self.assertTrue(result["passed"])
 
     def test_compliance_private_key_detected(self):
         from projects.expert_review.pre_screen import check_compliance
-        trace = '-----BEGIN PRIVATE KEY-----'
-        result = check_compliance(trace)
+        result = check_compliance("-----BEGIN PRIVATE KEY-----")
         self.assertFalse(result["passed"])
 
 
 # ============================================================
-# Part 3: writeback 双模块评分和新结论测试
+# Part 3: writeback 双模块评分和结论测试
 # ============================================================
 
 class TestWritebackLogic(unittest.TestCase):
-    """测试 writeback.py 的双模块评分提取和新结论判定"""
+    """测试 writeback.py 的双模块评分提取和结论判定"""
 
     def _expert_dims(self):
         return [
@@ -418,12 +406,11 @@ class TestWritebackLogic(unittest.TestCase):
         self.assertEqual(scores["total"], 10)
 
     def test_extract_scores_clamped(self):
-        """超出范围的分数应被裁剪"""
         from projects.expert_review.writeback import extract_scores
         ai_result = {
             "expert_ability": {
-                "task_complexity": {"score": 10},   # max 3
-                "iteration_quality": {"score": -1},  # min 0
+                "task_complexity": {"score": 10},
+                "iteration_quality": {"score": -1},
                 "professional_judgment": {"score": 4},
             }
         }
@@ -433,7 +420,6 @@ class TestWritebackLogic(unittest.TestCase):
         self.assertEqual(scores["professional_judgment"], 4)
 
     def test_extract_scores_direct_numbers(self):
-        """AI 直接返回数值而非 dict"""
         from projects.expert_review.writeback import extract_scores
         ai_result = {
             "expert_ability": {
@@ -450,42 +436,32 @@ class TestWritebackLogic(unittest.TestCase):
         scores = extract_scores({}, "expert_ability", self._expert_dims())
         self.assertEqual(scores["total"], 0)
 
-    # --- 新结论判定逻辑 ---
-
-    def test_conclusion_expert_storable(self):
-        """专家能力 >= 7 → 可储备专家"""
+    def test_conclusion_pass(self):
         from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(8, 5, "通过"), "可储备专家")
-        self.assertEqual(determine_conclusion(7, 3, "通过"), "可储备专家")
+        conclusion, score = determine_conclusion(8, 10, "通过", pass_score=70)
+        self.assertEqual(conclusion, "通过")
+        self.assertGreaterEqual(score, 70)
 
-    def test_conclusion_high_value_trace(self):
-        """Trace 资产 >= 9 → 高价值trace"""
+    def test_conclusion_fail(self):
         from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(4, 10, "通过"), "高价值trace")
-        self.assertEqual(determine_conclusion(3, 9, "通过"), "高价值trace")
-
-    def test_conclusion_both(self):
-        """两者同时满足 → 可储备专家 + 高价值trace"""
-        from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(8, 10, "通过"), "可储备专家 + 高价值trace")
-
-    def test_conclusion_manual_review(self):
-        """专家能力 >= 5 或 Trace >= 6 → 待人工复核"""
-        from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(5, 3, "通过"), "待人工复核")
-        self.assertEqual(determine_conclusion(3, 6, "通过"), "待人工复核")
-        self.assertEqual(determine_conclusion(6, 8, "通过"), "待人工复核")
-
-    def test_conclusion_reject(self):
-        """都不满足 → 拒绝"""
-        from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(4, 5, "通过"), "拒绝")
-        self.assertEqual(determine_conclusion(0, 0, "通过"), "拒绝")
+        conclusion, score = determine_conclusion(3, 4, "通过", pass_score=70)
+        self.assertEqual(conclusion, "不通过")
+        self.assertLess(score, 70)
 
     def test_conclusion_pre_screen_reject(self):
-        """粗筛拒绝 → 最终拒绝，不论分数"""
         from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(10, 12, "拒绝"), "拒绝")
+        conclusion, score = determine_conclusion(10, 12, "拒绝")
+        self.assertEqual(conclusion, "不通过")
+        self.assertEqual(score, 0.0)
+
+    def test_composite_score(self):
+        from projects.expert_review.writeback import compute_composite_score
+        score = compute_composite_score(8, 10, 10, 12)
+        self.assertAlmostEqual(score, 81.7, places=1)
+
+    def test_composite_score_zero(self):
+        from projects.expert_review.writeback import compute_composite_score
+        self.assertEqual(compute_composite_score(0, 0, 10, 12), 0.0)
 
 
 # ============================================================
@@ -497,25 +473,16 @@ class TestAIReviewInputBuild(unittest.TestCase):
 
     def test_build_input_text(self):
         from projects.expert_review.ai_review import _build_input_text
-        config = {
-            "field_mapping": {
-                "task_description": "任务描述",
-                "expert_name": "专家姓名",
-                "expert_id": "专家ID",
-                "position": "岗位方向",
-                "final_product": "最终产物",
-            }
-        }
-        fields = {
-            "任务描述": "实现一个分布式缓存系统",
-            "专家姓名": "张三",
-            "专家ID": "12345",
-            "岗位方向": "Coding",
-            "最终产物": {"link": "https://github.com/example"},
+        ctx_data = {
+            "task_description": "实现一个分布式缓存系统",
+            "expert_name": "张三",
+            "expert_id": "12345",
+            "position": "Coding",
+            "_raw_final_product": {"link": "https://github.com/example"},
         }
         trace_content = '{"type":"human","content":"你好"}'
 
-        text = _build_input_text(fields, trace_content, config)
+        text = _build_input_text(ctx_data, trace_content)
 
         self.assertIn("张三", text)
         self.assertIn("12345", text)
@@ -527,19 +494,13 @@ class TestAIReviewInputBuild(unittest.TestCase):
 
     def test_build_input_text_no_product_link(self):
         from projects.expert_review.ai_review import _build_input_text
-        config = {
-            "field_mapping": {
-                "task_description": "任务描述",
-                "expert_name": "专家姓名",
-                "expert_id": "专家ID",
-                "position": "岗位方向",
-                "final_product": "最终产物",
-            }
+        ctx_data = {
+            "task_description": "test",
+            "expert_name": "李四",
         }
-        fields = {"任务描述": "test", "专家姓名": "李四"}
-
-        text = _build_input_text(fields, "trace...", config)
-        self.assertNotIn("最终产物链接", text)  # 没有链接则不输出该节
+        text = _build_input_text(ctx_data, "trace...")
+        self.assertIn("李四", text)
+        self.assertIn("trace...", text)
 
 
 if __name__ == "__main__":

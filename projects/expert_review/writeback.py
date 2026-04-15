@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-第三层：结果回填主表
+第三层：算分 + 拼结论 + 生成机审说明
 
-读取粗筛和 AI 评审的结果 JSON，提取双模块分数（专家能力分 + Trace 资产分），
-判定最终结论，回填主表（审核状态 + 机审说明）。
+从 ctx_data.json 读取 ai_review_result，提取双模块分数，
+判定最终结论，把结果写回 ctx_data.json。
+实际飞书回填由 feishu_writeback processor 统一执行。
 
 用法:
-  python3 writeback.py --record-id <record_id> --project-dir <dir>
+  python3 writeback.py --record-id <id> --project-dir <dir> --ctx-data-file <path>
 """
 
 import argparse
@@ -16,25 +17,12 @@ import json
 import os
 import sys
 
+from core.ctx_utils import load_ctx_data, save_ctx_data
 from core.config_loader import load_project_config
-from core.feishu_utils import FeishuClient
-
-
-def read_json_file(path: str) -> dict:
-    """读取 JSON 文件。"""
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"文件不存在: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 def extract_scores(ai_result: dict, module_key: str, dimensions: list) -> dict:
-    """
-    从 AI 评审结果中提取指定模块的维度分数和总分。
-
-    module_key: "expert_ability" 或 "trace_asset"
-    dimensions: config 中对应模块的 dimensions 列表
-    """
+    """从 AI 评审结果中提取指定模块的维度分数和总分。"""
     module_data = ai_result.get(module_key, {})
     scores = {}
     total = 0
@@ -74,11 +62,7 @@ def determine_conclusion(expert_total: int, trace_total: int,
                          pre_screen_status: str,
                          pass_score: float = 70,
                          expert_max: int = 10, trace_max: int = 12) -> tuple:
-    """
-    根据综合分判定通过/不通过。
-
-    返回: (conclusion_str, composite_score)
-    """
+    """根据综合分判定通过/不通过。返回: (conclusion_str, composite_score)"""
     if pre_screen_status == "拒绝":
         return "不通过", 0.0
 
@@ -174,7 +158,6 @@ def _build_machine_remark(conclusion: str, composite_score: float,
             lines.append(overall)
         else:
             lines.append(f"综合评分未达及格线（{pass_score:.0f}），请参考以下方向改进。")
-        # 只列出明显不足的维度名称和简短方向，不贴详细 suggestion
         weak = []
         all_dims = list(EXPERT_DIM_LABELS.items()) + list(TRACE_DIM_LABELS.items())
         for key, (label, max_s) in all_dims:
@@ -189,61 +172,35 @@ def _build_machine_remark(conclusion: str, composite_score: float,
     return "\n".join(lines)
 
 
-def run_writeback(record_id: str, project_dir: str) -> int:
+def run_writeback(record_id: str, project_dir: str, ctx_data_file: str) -> int:
     """
-    执行结果回填主表。
-
-    record_id: 主表的 record_id
-    返回: 0=成功, 1=失败
+    从 ctx_data.json 读取 ai_review_result，算分拼结论，写回 ctx_data.json。
     """
     config = load_project_config(project_dir)
-    client = FeishuClient.from_config(config)
-    feishu = config["feishu"]
-    app_token = feishu["app_token"]
-    table_id = feishu["table_id"]
-    mfm = config.get("field_mapping", {})
     scoring = config.get("scoring", {})
-    workspace = config.get("workspace", {})
-    conclusion_map = config.get("conclusion_to_status", {})
 
     expert_cfg = scoring.get("expert_ability", {})
     trace_cfg = scoring.get("trace_asset", {})
     expert_dims = expert_cfg.get("dimensions", [])
     trace_dims = trace_cfg.get("dimensions", [])
 
-    pre_screen_path = os.environ.get(
-        "PRE_SCREEN_RESULT_PATH",
-        workspace.get("pre_screen_result_path", "/workspace/pre_screen_result.json"),
-    )
-    ai_review_path = os.environ.get(
-        "AI_REVIEW_RESULT_PATH",
-        workspace.get("ai_review_result_path", "/workspace/ai_review_result.json"),
-    )
+    # 从 ctx_data.json 读取数据
+    ctx_data = load_ctx_data(ctx_data_file)
 
-    print("===== 结果回填开始 =====")
-    print(f"Record ID (主表): {record_id}")
+    print("===== 算分 + 拼结论 开始 =====")
+    print(f"Record ID: {record_id}")
 
-    # 1. 读取粗筛结果
-    print("\n--- 读取粗筛结果 ---")
-    try:
-        pre_screen = read_json_file(pre_screen_path)
-        pre_screen_status = pre_screen.get("粗筛状态", "待审")
-        print(f"粗筛状态: {pre_screen_status}")
-    except Exception as e:
-        print(f"读取粗筛结果失败: {e}", file=sys.stderr)
-        pre_screen = {}
-        pre_screen_status = "待审"
+    # 读取 AI 评审结果
+    ai_result = ctx_data.get("ai_review_result", {})
+    if not ai_result:
+        print("警告: ai_review_result 为空", file=sys.stderr)
 
-    # 2. 读取 AI 评审结果
-    print("\n--- 读取 AI 评审结果 ---")
-    try:
-        ai_result = read_json_file(ai_review_path)
-        print(f"AI 评审结果键: {list(ai_result.keys())}")
-    except Exception as e:
-        print(f"读取 AI 评审结果失败: {e}", file=sys.stderr)
-        ai_result = {}
+    # 读取粗筛结果
+    pre_screen_result = ctx_data.get("pre_screen_result", {})
+    pre_screen_status = pre_screen_result.get("粗筛状态", "待审")
+    print(f"粗筛状态: {pre_screen_status}")
 
-    # 3. 提取双模块分数
+    # 提取双模块分数
     expert_scores = extract_scores(ai_result, "expert_ability", expert_dims)
     trace_scores = extract_scores(ai_result, "trace_asset", trace_dims)
 
@@ -259,7 +216,7 @@ def run_writeback(record_id: str, project_dir: str) -> int:
         print(f"  {key}: {trace_scores[key]}/{dim['max_score']}")
     print(f"  总分: {trace_scores['total']}/12")
 
-    # 4. 判定最终结论
+    # 判定最终结论
     pass_score = scoring.get("pass_score", 70)
     expert_max = expert_cfg.get("max_total", 10)
     trace_max = trace_cfg.get("max_total", 12)
@@ -269,42 +226,48 @@ def run_writeback(record_id: str, project_dir: str) -> int:
     )
     print(f"\n综合分: {composite_score:.0f}/100 → {conclusion}")
 
-    # 5. 组装机审说明（详细）+ 机审备注（人话）
+    # 组装机审说明（详细）+ 机审备注（人话）
     machine_note = _build_machine_note(expert_scores, trace_scores, ai_result)
     machine_remark = _build_machine_remark(
         conclusion, composite_score, expert_scores, trace_scores,
         ai_result, pass_score=pass_score,
     )
 
-    # 6. 回填主表（只写机审说明+机审备注，不改审核状态）
-    print("\n--- 主表回填 ---")
-    machine_note_field = mfm.get("machine_review_note", "机审说明")
-    machine_remark_field = mfm.get("machine_review_remark", "机审备注")
+    # 映射结论到审核状态
+    conclusion_map = config.get("conclusion_to_status", {})
+    if conclusion == "通过":
+        review_status = "pass"
+    elif pre_screen_status == "拒绝":
+        review_status = "reject"
+    else:
+        review_status = "manual_review"
 
-    try:
-        client.update_record(app_token, table_id, record_id, {
-            machine_note_field: machine_note,
-            machine_remark_field: machine_remark,
-        })
-        print(f"主表回填成功:")
-        print(f"  {machine_note_field}: ({len(machine_note)} 字符)")
-        print(f"  {machine_remark_field}: ({len(machine_remark)} 字符)")
-    except Exception as e:
-        print(f"主表回填失败: {e}", file=sys.stderr)
-        return 1
+    # 写回 ctx_data（如果粗筛没有已设置 machine_review_note 则写入）
+    if "machine_review_note" not in ctx_data or pre_screen_status != "拒绝":
+        ctx_data["machine_review_note"] = machine_note
+    ctx_data["machine_review_remark"] = machine_remark
+    ctx_data["review_status"] = review_status
 
-    print(f"\n===== 结果回填完成 =====")
+    save_ctx_data(ctx_data_file, ctx_data)
+
+    print(f"\n结果已写回 ctx_data.json")
+    print(f"  review_status: {review_status}")
+    print(f"  machine_review_note: ({len(machine_note)} 字符)")
+    print(f"  machine_review_remark: ({len(machine_remark)} 字符)")
+    print(f"\n===== 算分 + 拼结论 完成 =====")
+
     return 0
 
 
 def main():
-    parser = argparse.ArgumentParser(description="专家考核产物结果回填")
+    parser = argparse.ArgumentParser(description="专家考核产物算分拼结论")
     parser.add_argument("--record-id", required=True, help="主表 record_id")
     parser.add_argument("--project-dir", required=True, help="项目目录路径")
+    parser.add_argument("--ctx-data-file", required=True, help="ctx_data.json 路径")
     args = parser.parse_args()
 
     try:
-        exit_code = run_writeback(args.record_id, args.project_dir)
+        exit_code = run_writeback(args.record_id, args.project_dir, args.ctx_data_file)
     except Exception as e:
         print(f"系统错误: {e}", file=sys.stderr)
         import traceback

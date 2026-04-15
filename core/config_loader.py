@@ -5,6 +5,7 @@
 配置加载器
 
 加载项目 config.yaml，合并环境变量，提供字段映射查询。
+支持新格式 data_source.fields / data_sink.field_mapping 以及旧格式 field_mapping。
 """
 
 import os
@@ -67,11 +68,39 @@ def get_field_name(config: dict, logical_name: str) -> str:
     """
     通过逻辑名获取实际飞书字段名。
 
-    从 config["field_mapping"] 中查找。
+    查找顺序: data_source.fields → field_mapping
     例: get_field_name(config, "task_description") → "任务说明"
     """
+    # 优先从 data_source.fields 查找
+    ds = config.get("data_source", {})
+    ds_fields = ds.get("fields", {})
+    if logical_name in ds_fields:
+        return ds_fields[logical_name]
+
+    # 回退到旧的 field_mapping
     mapping = config.get("field_mapping", {})
     name = mapping.get(logical_name)
     if name is None:
         raise KeyError(f"字段映射中未找到逻辑名: {logical_name}")
+    return name
+
+
+def get_sink_field_name(config: dict, result_key: str) -> str:
+    """
+    通过结果键获取飞书回填字段名。
+
+    查找顺序: data_sink.field_mapping → field_mapping
+    例: get_sink_field_name(config, "review_status") → "审核状态"
+    """
+    # 优先从 data_sink.field_mapping 查找
+    sink = config.get("data_sink", {})
+    sink_mapping = sink.get("field_mapping", {})
+    if result_key in sink_mapping:
+        return sink_mapping[result_key]
+
+    # 回退到旧的 field_mapping
+    mapping = config.get("field_mapping", {})
+    name = mapping.get(result_key)
+    if name is None:
+        raise KeyError(f"输出字段映射中未找到: {result_key}")
     return name

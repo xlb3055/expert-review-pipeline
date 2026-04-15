@@ -121,6 +121,7 @@ class TestExtensibility(unittest.TestCase):
     def test_new_project_pipeline_runs(self):
         """新项目只有 1 个 stage，pipeline_runner 能正确执行"""
         from core.pipeline_runner import run_pipeline
+        from unittest.mock import patch, MagicMock
 
         config = {
             "project": {"name": "simple_check"},
@@ -132,25 +133,30 @@ class TestExtensibility(unittest.TestCase):
                 {"name": "check", "script": "check.py", "exit_code_handling": {0: "continue"}},
             ],
             "field_mapping": {},
+            "workspace": {"base_dir": tempfile.mkdtemp()},
         }
         script_code = textwrap.dedent("""\
             import argparse
             p = argparse.ArgumentParser()
             p.add_argument('--record-id')
             p.add_argument('--project-dir')
+            p.add_argument('--ctx-data-file', required=False)
             args = p.parse_args()
             print(f"running check for {args.record_id}")
         """)
         _, project_dir = self._create_project("simple_check", config, {"check.py": script_code})
 
-        result = run_pipeline(project_dir, "new_record_456")
+        with patch("core.processors.FeishuClient") as MockClient:
+            MockClient.from_config.return_value = MagicMock()
+            result = run_pipeline(project_dir, "new_record_456")
         self.assertEqual(result, 0)
 
     def test_new_project_5_stages(self):
         """新项目有 5 个阶段，框架能支持"""
         from core.pipeline_runner import run_pipeline
+        from unittest.mock import patch, MagicMock
 
-        script_code = "import argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.parse_args()"
+        script_code = "import argparse\np = argparse.ArgumentParser()\np.add_argument('--record-id')\np.add_argument('--project-dir')\np.add_argument('--ctx-data-file', required=False)\np.parse_args()"
 
         config = {
             "project": {"name": "five_stages"},
@@ -163,11 +169,14 @@ class TestExtensibility(unittest.TestCase):
                 for i in range(5)
             ],
             "field_mapping": {},
+            "workspace": {"base_dir": tempfile.mkdtemp()},
         }
         scripts = {f"s{i}.py": script_code for i in range(5)}
         _, project_dir = self._create_project("five_stages", config, scripts)
 
-        result = run_pipeline(project_dir, "test")
+        with patch("core.processors.FeishuClient") as MockClient:
+            MockClient.from_config.return_value = MagicMock()
+            result = run_pipeline(project_dir, "test")
         self.assertEqual(result, 0)
 
     def test_writeback_with_custom_dimensions(self):

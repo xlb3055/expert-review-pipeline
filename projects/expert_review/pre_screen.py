@@ -4,14 +4,9 @@
 """
 第一层：7 项硬门槛初筛
 
-硬门槛标准：
-  1. 任务真实性 — 来自真实工作场景，不是 demo、练习题、拼凑题
-  2. Trace 完整性 — 提交原始完整 trace，不删失败片段，不做后拼接
-  3. 工具闭环存在 — 至少有 1 个清晰的 提需求→工具执行→观察结果→调整动作 闭环
-  4. 最终产物存在 — 有代码、页面、文档、流程配置或可验证交付物
-  5. 验证动作存在 — 至少有 1 次明确验证，不是"看起来可以"
-  6. Trace-产物一致 — trace 中做的事情和最终提交物能对上
-  7. 合规可用 — 可脱敏、无密钥、无敏感客户数据、无不可外发信息
+从 ctx_data.json 读取 feishu_fetch 拉到的字段，执行 7 项检查。
+Trace 下载逻辑保留在此脚本内（属于业务逻辑）。
+结果写回 ctx_data.json，由 feishu_writeback 统一回填。
 
 退出码:
   0 = 通过（继续 AI 评审）
@@ -20,7 +15,7 @@
   3 = 系统错误
 
 用法:
-  python3 pre_screen.py --record-id <record_id> --project-dir <dir>
+  python3 pre_screen.py --record-id <id> --project-dir <dir> --ctx-data-file <path>
 """
 
 import argparse
@@ -29,7 +24,8 @@ import os
 import re
 import sys
 
-from core.config_loader import load_project_config, get_field_name
+from core.ctx_utils import load_ctx_data, save_ctx_data
+from core.config_loader import load_project_config
 from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
@@ -65,11 +61,9 @@ _SECRET_PATTERNS = re.compile(
 
 # ---------- 7 项检查 ----------
 
-def check_task_authenticity(fields: dict, desc_field: str) -> dict:
+def check_task_authenticity(task_description: str) -> dict:
     """检查 1: 任务真实性 — 不是 demo/练习/拼凑题。"""
-    desc = normalize_field_value(fields.get(desc_field, ""))
-
-    if not desc.strip():
+    if not task_description.strip():
         return {
             "check": "task_authenticity",
             "passed": False,
@@ -77,7 +71,7 @@ def check_task_authenticity(fields: dict, desc_field: str) -> dict:
             "action": "reject",
         }
 
-    if _REJECT_PATTERNS.search(desc.strip()):
+    if _REJECT_PATTERNS.search(task_description.strip()):
         return {
             "check": "task_authenticity",
             "passed": False,
@@ -88,17 +82,14 @@ def check_task_authenticity(fields: dict, desc_field: str) -> dict:
     return {
         "check": "task_authenticity",
         "passed": True,
-        "detail": f"任务描述内容合规（{len(desc)}字）",
+        "detail": f"任务描述内容合规（{len(task_description)}字）",
     }
 
 
-def check_trace_integrity(fields: dict, trace_field_name: str,
+def check_trace_integrity(has_trace_file: bool,
                            trace: TraceAnalysis, min_rounds: int) -> dict:
     """检查 2: Trace 存在 + 可解析 + 轮次 >= min_rounds。"""
-    trace_field = fields.get(trace_field_name)
-    file_token = extract_attachment_file_token(trace_field)
-
-    if not file_token:
+    if not has_trace_file:
         return {
             "check": "trace_integrity",
             "passed": False,
@@ -145,11 +136,9 @@ def check_tool_loop_exists(trace: TraceAnalysis) -> dict:
     }
 
 
-def check_final_product_exists(fields: dict, product_field: str) -> dict:
+def check_final_product_exists(raw_final_product) -> dict:
     """检查 4: 最终产物不为空。"""
-    product_value = fields.get(product_field, "")
-
-    attachment = extract_attachment_file_token(product_value)
+    attachment = extract_attachment_file_token(raw_final_product)
     if attachment:
         return {
             "check": "final_product_exists",
@@ -157,7 +146,7 @@ def check_final_product_exists(fields: dict, product_field: str) -> dict:
             "detail": "最终产物存在（附件）",
         }
 
-    link = extract_link_url(product_value)
+    link = extract_link_url(raw_final_product)
     if link:
         return {
             "check": "final_product_exists",
@@ -165,7 +154,7 @@ def check_final_product_exists(fields: dict, product_field: str) -> dict:
             "detail": "最终产物存在（链接）",
         }
 
-    text = normalize_field_value(product_value)
+    text = normalize_field_value(raw_final_product)
     if text.strip():
         return {
             "check": "final_product_exists",
@@ -182,10 +171,7 @@ def check_final_product_exists(fields: dict, product_field: str) -> dict:
 
 
 def check_verification_exists(clean_trace: str) -> dict:
-    """检查 5: 精简 trace 中有验证类工具调用（Bash/execute 等）。
-
-    使用过滤噪音后的精简 trace（只含用户输入+工具调用摘要）。
-    """
+    """检查 5: 精简 trace 中有验证类工具调用（Bash/execute 等）。"""
     verification_keywords = re.compile(
         r"\[工具调用\]\s*(bash|execute|terminal|shell)",
         re.IGNORECASE,
@@ -227,10 +213,7 @@ def check_trace_product_consistent(trace: TraceAnalysis, has_product: bool) -> d
 
 
 def check_compliance(clean_trace: str) -> dict:
-    """检查 7: 精简 trace 中不含明显密钥模式。
-
-    使用过滤噪音后的精简 trace，只看用户输入和工具调用内容。
-    """
+    """检查 7: 精简 trace 中不含明显密钥模式。"""
     match = _SECRET_PATTERNS.search(clean_trace)
     if match:
         snippet = match.group()[:30] + "..."
@@ -249,51 +232,42 @@ def check_compliance(clean_trace: str) -> dict:
 
 # ---------- 主流程 ----------
 
-def run_pre_screen(record_id: str, project_dir: str) -> int:
+def run_pre_screen(record_id: str, project_dir: str, ctx_data_file: str) -> int:
     """
     执行粗筛流程。
 
-    record_id: 主表的 record_id
+    从 ctx_data.json 读取数据，执行 7 项检查，结果写回 ctx_data.json。
+    Trace 下载需要飞书 API（原始附件信息在 ctx_data 的 _raw_trace_file 中）。
+
     返回退出码: 0=通过, 1=拒绝, 2=待复核, 3=系统错误
     """
     config = load_project_config(project_dir)
-    client = FeishuClient.from_config(config)
-    feishu = config["feishu"]
-    app_token = feishu["app_token"]
-    table_id = feishu["table_id"]
     pre_cfg = config.get("pre_screen", {})
     workspace = config.get("workspace", {})
+    min_rounds = pre_cfg.get("min_conversation_rounds", 3)
+
+    # 从 ctx_data.json 读取数据
+    ctx_data = load_ctx_data(ctx_data_file)
 
     trace_output_path = os.environ.get(
         "TRACE_OUTPUT_PATH",
-        workspace.get("trace_path", "/workspace/trace.jsonl"),
+        workspace.get("trace_path", os.path.join(os.path.dirname(ctx_data_file), "trace.jsonl")),
     )
-    result_path = os.environ.get(
-        "PRE_SCREEN_RESULT_PATH",
-        workspace.get("pre_screen_result_path", "/workspace/pre_screen_result.json"),
-    )
-    min_rounds = pre_cfg.get("min_conversation_rounds", 3)
 
     print("===== 硬门槛初筛开始 =====")
-    print(f"Record ID (主表): {record_id}")
-
-    # 1. 从主表获取记录
-    print("\n--- 从主表获取记录 ---")
-    record = client.get_record(app_token, table_id, record_id)
-    fields = record.get("fields", {})
+    print(f"Record ID: {record_id}")
 
     results = []
 
     # 检查 1: 任务真实性
-    desc_field = get_field_name(config, "task_description")
-    check1 = check_task_authenticity(fields, desc_field)
+    task_desc = ctx_data.get("task_description", "")
+    check1 = check_task_authenticity(task_desc)
     results.append(check1)
     print(f"[检查1] task_authenticity: {'通过' if check1['passed'] else '不通过'} — {check1['detail']}")
 
-    # 下载 Trace 附件
-    trace_field_name = get_field_name(config, "trace_file")
-    trace_field = fields.get(trace_field_name)
-    file_token = extract_attachment_file_token(trace_field)
+    # 下载 Trace 附件（业务逻辑，需要飞书 API）
+    raw_trace_file = ctx_data.get("_raw_trace_file")
+    file_token = extract_attachment_file_token(raw_trace_file)
     trace = TraceAnalysis()
     clean_trace = ""
 
@@ -303,13 +277,13 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
         try:
-            download_url = extract_attachment_url(trace_field)
+            client = FeishuClient.from_config(config)
+            download_url = extract_attachment_url(raw_trace_file)
             client.download_attachment(file_token, trace_output_path,
                                        download_url=download_url or None)
             trace = parse_trace_file(trace_output_path)
             print(f"Trace 解析结果: 轮次={trace.conversation_rounds}, 模型={trace.model_name}, "
                   f"工具调用={trace.tool_call_count}, 总行数={trace.total_lines}")
-            # 用 trace_extractor 提取精简内容（过滤噪音，只保留用户输入+工具调用摘要）
             clean_trace = extract_user_focused_content(trace_output_path, max_bytes=500000)
             print(f"精简 Trace 内容: {len(clean_trace)} 字符")
         except Exception as e:
@@ -319,10 +293,10 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
                 "detail": f"Trace 下载失败: {e}",
                 "action": "reject",
             })
-            return _finalize(client, app_token, table_id, record_id, results, "拒绝", result_path, config)
+            return _finalize(ctx_data, ctx_data_file, results, "拒绝", clean_trace, trace_output_path)
 
     # 检查 2: Trace 完整性
-    check2 = check_trace_integrity(fields, trace_field_name, trace, min_rounds)
+    check2 = check_trace_integrity(bool(file_token), trace, min_rounds)
     results.append(check2)
     print(f"[检查2] trace_integrity: {'通过' if check2['passed'] else '不通过'} — {check2['detail']}")
 
@@ -332,28 +306,29 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     print(f"[检查3] tool_loop_exists: {'通过' if check3['passed'] else '不通过'} — {check3['detail']}")
 
     # 检查 4: 最终产物
-    product_field = get_field_name(config, "final_product")
-    check4 = check_final_product_exists(fields, product_field)
+    raw_final_product = ctx_data.get("_raw_final_product")
+    if raw_final_product is None:
+        raw_final_product = ctx_data.get("_raw_fields", {}).get("最终产物")
+    check4 = check_final_product_exists(raw_final_product)
     results.append(check4)
     print(f"[检查4] final_product_exists: {'通过' if check4['passed'] else '不通过'} — {check4['detail']}")
 
-    # 检查 5: 验证动作（使用精简 trace）
+    # 检查 5: 验证动作
     check5 = check_verification_exists(clean_trace)
     results.append(check5)
     print(f"[检查5] verification_exists: {'通过' if check5['passed'] else '不通过'} — {check5['detail']}")
 
     # 检查 6: Trace-产物一致
-    product_value = fields.get(product_field, "")
     has_product = bool(
-        extract_attachment_file_token(product_value)
-        or extract_link_url(product_value)
-        or normalize_field_value(product_value).strip()
-    )
+        extract_attachment_file_token(raw_final_product)
+        or extract_link_url(raw_final_product)
+        or normalize_field_value(raw_final_product).strip()
+    ) if raw_final_product else False
     check6 = check_trace_product_consistent(trace, has_product)
     results.append(check6)
     print(f"[检查6] trace_product_consistent: {'通过' if check6['passed'] else '不通过'} — {check6['detail']}")
 
-    # 检查 7: 合规可用（使用精简 trace）
+    # 检查 7: 合规可用
     check7 = check_compliance(clean_trace)
     results.append(check7)
     print(f"[检查7] compliance_check: {'通过' if check7['passed'] else '不通过'} — {check7['detail']}")
@@ -363,62 +338,39 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     manual_review = [r for r in results if not r["passed"] and r.get("action") == "manual_review"]
 
     if rejected:
-        return _finalize(client, app_token, table_id, record_id, results, "拒绝", result_path, config)
+        return _finalize(ctx_data, ctx_data_file, results, "拒绝", clean_trace, trace_output_path)
     elif manual_review:
-        return _finalize(client, app_token, table_id, record_id, results, "待人工复核", result_path, config)
+        return _finalize(ctx_data, ctx_data_file, results, "待人工复核", clean_trace, trace_output_path)
     else:
-        return _finalize(client, app_token, table_id, record_id, results, "通过", result_path, config)
+        return _finalize(ctx_data, ctx_data_file, results, "通过", clean_trace, trace_output_path)
 
 
-def _finalize(client: FeishuClient, app_token: str, table_id: str,
-              record_id: str, results: list, status: str,
-              result_path: str, config: dict) -> int:
-    """汇总结果、主表回填、保存本地 JSON、返回退出码。"""
-    mfm = config.get("field_mapping", {})
-    conclusion_map = config.get("conclusion_to_status", {})
-
-    result_obj = {
+def _finalize(ctx_data: dict, ctx_data_file: str, results: list,
+              status: str, clean_trace: str, trace_output_path: str) -> int:
+    """汇总结果写回 ctx_data.json，返回退出码。"""
+    # 粗筛结果写入 ctx_data
+    ctx_data["pre_screen_result"] = {
         "粗筛状态": status,
         "checks": results,
         "passed_count": sum(1 for r in results if r["passed"]),
         "total_count": len(results),
     }
 
-    # 保存本地结果
-    result_dir = os.path.dirname(result_path)
-    if result_dir:
-        os.makedirs(result_dir, exist_ok=True)
-    with open(result_path, "w", encoding="utf-8") as f:
-        json.dump(result_obj, f, ensure_ascii=False, indent=2)
-    print(f"\n粗筛结果已保存: {result_path}")
+    # 保存 trace 相关信息供后续阶段使用
+    if clean_trace:
+        ctx_data["trace_content"] = clean_trace
+    if trace_output_path and os.path.isfile(trace_output_path):
+        ctx_data["trace_output_path"] = trace_output_path
 
-    # -- 主表回填 --
-    review_status_field = mfm.get("review_status", "审核状态")
-    machine_note_field = mfm.get("machine_review_note", "机审说明")
-
+    # 如果粗筛拒绝，写入拒绝原因到 ctx_data 供 writeback 使用
     if status == "拒绝":
-        print("\n--- 主表回填（粗筛拒绝） ---")
         reject_reasons = [r["detail"] for r in results if not r["passed"] and r.get("action") == "reject"]
-        machine_note = "【粗筛拒绝】\n" + "\n".join(f"- {r}" for r in reject_reasons)
-        try:
-            client.update_record(app_token, table_id, record_id, {
-                review_status_field: conclusion_map.get("reject", "已拒绝"),
-                machine_note_field: machine_note,
-            })
-            print("主表回填成功")
-        except Exception as e:
-            print(f"主表回填失败: {e}", file=sys.stderr)
-    elif status == "通过":
-        print("\n--- 主表回填（粗筛通过，进入AI评审） ---")
-        try:
-            client.update_record(app_token, table_id, record_id, {
-                review_status_field: conclusion_map.get("manual_review", "初审中"),
-            })
-            print("主表回填成功")
-        except Exception as e:
-            print(f"主表回填失败（非致命）: {e}", file=sys.stderr)
+        ctx_data["machine_review_note"] = "【粗筛拒绝】\n" + "\n".join(f"- {r}" for r in reject_reasons)
+        ctx_data["review_status"] = "reject"
 
-    print(f"\n===== 硬门槛初筛结束: {status} =====")
+    save_ctx_data(ctx_data_file, ctx_data)
+    print(f"\n粗筛结果已写回 ctx_data.json")
+    print(f"===== 硬门槛初筛结束: {status} =====")
 
     if status == "拒绝":
         return 1
@@ -432,10 +384,11 @@ def main():
     parser = argparse.ArgumentParser(description="专家考核产物硬门槛初筛")
     parser.add_argument("--record-id", required=True, help="主表 record_id")
     parser.add_argument("--project-dir", required=True, help="项目目录路径")
+    parser.add_argument("--ctx-data-file", required=True, help="ctx_data.json 路径")
     args = parser.parse_args()
 
     try:
-        exit_code = run_pre_screen(args.record_id, args.project_dir)
+        exit_code = run_pre_screen(args.record_id, args.project_dir, args.ctx_data_file)
     except Exception as e:
         print(f"系统错误: {e}", file=sys.stderr)
         import traceback

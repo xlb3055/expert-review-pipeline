@@ -4,17 +4,11 @@
 """
 第二层：AI 评审
 
-在 Daytona 沙箱中执行 Claude Code，对专家考核产物进行双模块评分：
-- 专家能力分（0-10）
-- Trace 资产分（0-12）
-
-数据流：
-  - 从主表读取数据（record_id 是主表的 record_id）
-  - 用 trace_extractor 提取用户聚焦内容
-  - AI 评审结果保存到本地 JSON，供 writeback 阶段使用
+从 ctx_data.json 读取字段和 trace_content，调用 AI 评审。
+结果写回 ctx_data.json。
 
 用法:
-  python3 ai_review.py --record-id <record_id> --project-dir <dir>
+  python3 ai_review.py --record-id <id> --project-dir <dir> --ctx-data-file <path>
 """
 
 import argparse
@@ -24,7 +18,8 @@ import sys
 import time
 from pathlib import Path
 
-from core.config_loader import load_project_config, get_field_name
+from core.ctx_utils import load_ctx_data, save_ctx_data
+from core.config_loader import load_project_config
 from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
@@ -34,7 +29,7 @@ from core.feishu_utils import (
 )
 from core.trace_extractor import extract_user_focused_content
 
-# Daytona 为可选依赖，没装则只走直连 API 模式
+# Daytona 为可选依赖
 try:
     from core.daytona_runner import DaytonaRunConfig, run_claude_in_sandbox
     _HAS_DAYTONA = True
@@ -42,20 +37,18 @@ except ImportError:
     _HAS_DAYTONA = False
 
 
-def _build_input_text(fields: dict, trace_content: str, config: dict) -> str:
-    """组装 AI 评审的输入文本（使用主表字段映射）。"""
-    mfm = config.get("field_mapping", {})
+def _build_input_text(ctx_data: dict, trace_content: str) -> str:
+    """组装 AI 评审的输入文本（从 ctx_data 读取字段）。"""
+    task_desc = ctx_data.get("task_description", "")
+    expert_name = ctx_data.get("expert_name", "")
+    expert_id = ctx_data.get("expert_id", "")
+    position = ctx_data.get("position", "")
 
-    task_desc = normalize_field_value(fields.get(mfm.get("task_description", "任务说明"), ""))
-    expert_name = normalize_field_value(fields.get(mfm.get("expert_name", "提交人"), ""))
-    expert_id = normalize_field_value(fields.get(mfm.get("expert_id", "talent_id"), ""))
-    position = normalize_field_value(fields.get(mfm.get("position", "岗位方向"), ""))
-
-    product_field = mfm.get("final_product", "最终产物")
-    product_value = fields.get(product_field, "")
-    product_link = extract_link_url(product_value)
+    # 最终产物：优先链接，回退文本
+    raw_product = ctx_data.get("_raw_final_product")
+    product_link = extract_link_url(raw_product) if raw_product else ""
     if not product_link:
-        product_link = normalize_field_value(product_value)
+        product_link = ctx_data.get("final_product", "")
 
     parts = [
         "# 专家考核产物 — AI 评审输入",
@@ -89,7 +82,7 @@ def _build_input_text(fields: dict, trace_content: str, config: dict) -> str:
 
 def _call_claude_cli(prompt_content: str, schema_content: str,
                      input_text: str, model: str, timeout: int = 600) -> dict:
-    """在当前环境直接调用 claude CLI（适用于已在 Daytona 沙箱内的场景）。"""
+    """在当前环境直接调用 claude CLI。"""
     import subprocess
     import tempfile
 
@@ -127,7 +120,6 @@ def _call_claude_cli(prompt_content: str, schema_content: str,
             raise RuntimeError("Claude CLI 返回空输出")
 
         result = json.loads(raw)
-        # 处理 structured_output 包装
         if isinstance(result.get("result"), str):
             try:
                 result = json.loads(result["result"])
@@ -138,7 +130,7 @@ def _call_claude_cli(prompt_content: str, schema_content: str,
 
 def _call_api_direct(prompt_content: str, schema_content: str,
                      input_text: str, model: str) -> dict:
-    """直连 OpenRouter API 完成评审，返回解析后的 JSON dict。"""
+    """直连 OpenRouter API 完成评审。"""
     from openai import OpenAI
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -169,29 +161,29 @@ def _call_api_direct(prompt_content: str, schema_content: str,
     return json.loads(raw)
 
 
-def run_ai_review(record_id: str, project_dir: str) -> int:
+def run_ai_review(record_id: str, project_dir: str, ctx_data_file: str) -> int:
     """
     执行 AI 评审流程。
 
-    record_id: 主表的 record_id
+    从 ctx_data.json 读取字段和 trace_content，调用 AI 评审。
+    结果写回 ctx_data.json。
+
     返回: 0=成功, 1=失败
     """
     config = load_project_config(project_dir)
-    client = FeishuClient.from_config(config)
-    feishu = config["feishu"]
-    app_token = feishu["app_token"]
-    table_id = feishu["table_id"]
     ai_cfg = config.get("ai_review", {})
     workspace = config.get("workspace", {})
 
-    trace_input_path = os.environ.get(
-        "TRACE_OUTPUT_PATH",
-        workspace.get("trace_path", "/workspace/trace.jsonl"),
-    )
-    result_path = os.environ.get(
-        "AI_REVIEW_RESULT_PATH",
-        workspace.get("ai_review_result_path", "/workspace/ai_review_result.json"),
-    )
+    # 从 ctx_data.json 读取数据
+    ctx_data = load_ctx_data(ctx_data_file)
+
+    # 粗筛已拒绝 → 跳过 AI 评审
+    pre_screen_result = ctx_data.get("pre_screen_result", {})
+    if pre_screen_result.get("粗筛状态") == "拒绝":
+        print("粗筛已拒绝，跳过 AI 评审")
+        ctx_data["ai_review_result"] = _make_error_result("粗筛已拒绝，跳过 AI 评审")
+        save_ctx_data(ctx_data_file, ctx_data)
+        return 0
 
     model = os.environ.get(
         "ANTHROPIC_MODEL",
@@ -200,40 +192,46 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
 
     t0 = time.time()
     print("===== AI 评审开始 =====")
-    print(f"Record ID (主表): {record_id}")
+    print(f"Record ID: {record_id}")
     print(f"模型: {model}")
 
-    # 1. 从主表获取记录
-    print("\n--- 从主表获取记录 ---")
-    record = client.get_record(app_token, table_id, record_id)
-    fields = record.get("fields", {})
+    # 获取 trace 内容
+    trace_content = ctx_data.get("trace_content", "")
 
-    # 2. 如果 Trace 文件不存在（pre_screen 已下载），需要重新下载
-    if not os.path.exists(trace_input_path):
-        print("\n--- Trace 文件不存在，重新下载 ---")
-        trace_field_name = get_field_name(config, "trace_file")
-        trace_field = fields.get(trace_field_name)
-        file_token = extract_attachment_file_token(trace_field)
-        if file_token:
-            output_dir = os.path.dirname(trace_input_path)
-            if output_dir:
-                os.makedirs(output_dir, exist_ok=True)
-            download_url = extract_attachment_url(trace_field)
-            client.download_attachment(file_token, trace_input_path,
-                                       download_url=download_url or None)
+    # 如果 pre_screen 没有提取 trace_content，尝试从文件读取
+    if not trace_content:
+        trace_path = ctx_data.get("trace_output_path", "")
+        if not trace_path:
+            trace_path = os.environ.get(
+                "TRACE_OUTPUT_PATH",
+                workspace.get("trace_path", os.path.join(os.path.dirname(ctx_data_file), "trace.jsonl")),
+            )
+        if os.path.exists(trace_path):
+            trace_content = extract_user_focused_content(trace_path, max_bytes=200000)
         else:
-            print("警告: 主表中未找到 Trace 附件", file=sys.stderr)
+            # 需要下载 trace
+            print("\n--- Trace 文件不存在，尝试下载 ---")
+            raw_trace_file = ctx_data.get("_raw_trace_file")
+            file_token = extract_attachment_file_token(raw_trace_file)
+            if file_token:
+                client = FeishuClient.from_config(config)
+                output_dir = os.path.dirname(trace_path)
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                download_url = extract_attachment_url(raw_trace_file)
+                client.download_attachment(file_token, trace_path,
+                                           download_url=download_url or None)
+                trace_content = extract_user_focused_content(trace_path, max_bytes=200000)
+            else:
+                print("警告: 无法获取 Trace 内容", file=sys.stderr)
 
-    # 3. 用 trace_extractor 提取用户聚焦内容
-    print("\n--- 提取 Trace 用户聚焦内容 ---")
-    trace_content = extract_user_focused_content(trace_input_path, max_bytes=200000)
     print(f"Trace 精简内容长度: {len(trace_content)} 字符")
 
-    # 4. 组装输入文本
-    input_text = _build_input_text(fields, trace_content, config)
+    # 组装输入文本
+    input_text = _build_input_text(ctx_data, trace_content)
     print(f"输入文本总长度: {len(input_text)} 字符")
 
-    # 5. 读取 prompt 和 schema
+    # 读取 prompt 和 schema
     prompt_file = Path(project_dir) / ai_cfg.get("prompt_file", "prompt.md")
     schema_file = Path(project_dir) / ai_cfg.get("schema_file", "schema.json")
 
@@ -247,9 +245,7 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     prompt_content = prompt_file.read_text(encoding="utf-8")
     schema_content = schema_file.read_text(encoding="utf-8")
 
-    # 6. 调用 AI 评审
-    # 优先级: 本地 Claude CLI（已在沙箱内） > 新建 Daytona 沙箱 > 直连 API
-    # AI_REVIEW_MODE=api 可强制跳过前两者
+    # 调用 AI 评审
     import shutil
     mode = os.environ.get("AI_REVIEW_MODE", "").lower()
     has_claude_cli = shutil.which("claude") is not None
@@ -259,7 +255,7 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     elapsed = 0
     ai_timeout = int(os.environ.get("CLAUDE_TIMEOUT", str(ai_cfg.get("timeout", 600))))
 
-    # 6a. 本地有 claude CLI → 直接跑（已在 Daytona 沙箱内，免费）
+    # 本地有 claude CLI → 直接跑
     if mode != "api" and has_claude_cli:
         print(f"\n--- 本地 Claude CLI --- [{time.time()-t0:.1f}s]")
         try:
@@ -271,7 +267,7 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
         except Exception as e:
             print(f"Claude CLI 失败: {e}", file=sys.stderr)
 
-    # 6b. 本地没有 CLI，尝试新建 Daytona 沙箱
+    # Daytona 沙箱
     if result_obj is None and mode != "api" and can_daytona and not has_claude_cli:
         print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")
         sandbox_res = ai_cfg.get("sandbox_resources", {})
@@ -296,7 +292,7 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
         except Exception as e:
             print(f"Daytona 沙箱异常: {e}", file=sys.stderr)
 
-    # 6c. 兜底：直连 API
+    # 兜底：直连 API
     if result_obj is None and can_api:
         if has_claude_cli or can_daytona:
             print("自动回退直连 API ...")
@@ -306,29 +302,28 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
 
     if result_obj is None:
         print("错误: 无可用的 AI 评审通道", file=sys.stderr)
-        _save_error_result("无可用评审通道", result_path)
+        ctx_data["ai_review_result"] = _make_error_result("无可用评审通道")
+        save_ctx_data(ctx_data_file, ctx_data)
         return 1
 
-    # 7. 解包 schema 包装
+    # 解包 schema 包装
     if "expert_review_result" in result_obj and "expert_ability" not in result_obj:
         result_obj = result_obj["expert_review_result"]
 
-    # 8. 保存结果
-    result_dir = os.path.dirname(result_path)
-    if result_dir:
-        os.makedirs(result_dir, exist_ok=True)
-    with open(result_path, "w", encoding="utf-8") as f:
-        json.dump(result_obj, f, ensure_ascii=False, indent=2)
-    print(f"\nAI 评审结果已保存: {result_path}")
+    # 写回 ctx_data
+    ctx_data["ai_review_result"] = result_obj
+    save_ctx_data(ctx_data_file, ctx_data)
+
+    print(f"\nAI 评审结果已写回 ctx_data.json")
     print(f"结果内容:\n{json.dumps(result_obj, ensure_ascii=False, indent=2)[:1000]}")
     print(f"总耗时: {elapsed:.1f}s")
 
     return 0
 
 
-def _save_error_result(error_msg: str, result_path: str):
-    """保存错误结果到本地文件。"""
-    result = {
+def _make_error_result(error_msg: str) -> dict:
+    """生成错误结果。"""
+    return {
         "error": error_msg,
         "expert_ability": {
             "task_complexity": {"score": 0, "evidence": "评审失败"},
@@ -348,27 +343,28 @@ def _save_error_result(error_msg: str, result_path: str):
         "overall_assessment": f"AI 评审失败: {error_msg}",
         "trace_highlights": [],
     }
-    result_dir = os.path.dirname(result_path)
-    if result_dir:
-        os.makedirs(result_dir, exist_ok=True)
-    with open(result_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
 
 
 def main():
     parser = argparse.ArgumentParser(description="专家考核产物 AI 评审")
     parser.add_argument("--record-id", required=True, help="主表 record_id")
     parser.add_argument("--project-dir", required=True, help="项目目录路径")
+    parser.add_argument("--ctx-data-file", required=True, help="ctx_data.json 路径")
     args = parser.parse_args()
 
     try:
-        exit_code = run_ai_review(args.record_id, args.project_dir)
+        exit_code = run_ai_review(args.record_id, args.project_dir, args.ctx_data_file)
     except Exception as e:
         print(f"系统错误: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc()
-        result_path = "/workspace/ai_review_result.json"
-        _save_error_result(str(e), result_path)
+        # 写回错误结果
+        try:
+            ctx_data = load_ctx_data(args.ctx_data_file)
+            ctx_data["ai_review_result"] = _make_error_result(str(e))
+            save_ctx_data(args.ctx_data_file, ctx_data)
+        except Exception:
+            pass
         exit_code = 1
 
     sys.exit(exit_code)

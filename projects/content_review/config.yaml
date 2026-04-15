@@ -1,0 +1,54 @@
+project:
+  name: content_review
+  description: "内容质量审核（示例项目）"
+
+feishu:
+  app_id: ""
+  app_secret: ""
+  app_token: ""    # env: BITABLE_APP_TOKEN
+  table_id: ""     # env: BITABLE_TABLE_ID
+
+data_source:
+  type: feishu_record
+  fields:
+    title: "标题"
+    content: "内容"
+    author: "作者"
+    status: "审核状态"
+
+data_sink:
+  type: feishu_record
+  field_mapping:
+    review_status: "审核状态"
+    review_note: "机审说明"
+  status_mapping:
+    pass: "审核通过"
+    reject: "已拒绝"
+
+# Pipeline 阶段编排
+# feishu_fetch / feishu_writeback 是通用 processor
+# 中间阶段是业务脚本（通过 ctx_data.json 读写数据）
+stages:
+  - name: fetch_data
+    processor: feishu_fetch
+    description: "拉取飞书记录"
+
+  - name: ai_review
+    script: ai_review.py
+    description: "AI 内容审核"
+    exit_code_handling:
+      0: continue
+      1: continue
+
+  - name: writeback
+    processor: feishu_writeback
+    description: "结果回填"
+
+ai_review:
+  prompt_file: prompt.md
+  schema_file: schema.json
+  model: ""
+  timeout: 300
+
+workspace:
+  base_dir: "/workspace"
