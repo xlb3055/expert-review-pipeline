@@ -87,6 +87,55 @@ def _build_input_text(fields: dict, trace_content: str, config: dict) -> str:
     return "\n".join(parts)
 
 
+def _call_claude_cli(prompt_content: str, schema_content: str,
+                     input_text: str, model: str, timeout: int = 600) -> dict:
+    """在当前环境直接调用 claude CLI（适用于已在 Daytona 沙箱内的场景）。"""
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        prompt_file = os.path.join(tmpdir, "prompt.md")
+        schema_file = os.path.join(tmpdir, "schema.json")
+        input_file = os.path.join(tmpdir, "input.txt")
+
+        with open(prompt_file, "w", encoding="utf-8") as f:
+            f.write(prompt_content)
+        with open(schema_file, "w", encoding="utf-8") as f:
+            f.write(schema_content)
+        with open(input_file, "w", encoding="utf-8") as f:
+            f.write(input_text)
+
+        cmd = (
+            f"cat {input_file} | claude -p "
+            f"--system-prompt-file {prompt_file} "
+            f"--output-format json "
+            f'--json-schema "$(cat {schema_file})"'
+        )
+
+        print(f"执行 Claude CLI: claude -p ...")
+        proc = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            timeout=timeout, cwd=tmpdir,
+        )
+
+        if proc.returncode != 0:
+            stderr = proc.stderr.strip()[:500] if proc.stderr else ""
+            raise RuntimeError(f"Claude CLI 退出码 {proc.returncode}: {stderr}")
+
+        raw = proc.stdout.strip()
+        if not raw:
+            raise RuntimeError("Claude CLI 返回空输出")
+
+        result = json.loads(raw)
+        # 处理 structured_output 包装
+        if isinstance(result.get("result"), str):
+            try:
+                result = json.loads(result["result"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return result
+
+
 def _call_api_direct(prompt_content: str, schema_content: str,
                      input_text: str, model: str) -> dict:
     """直连 OpenRouter API 完成评审，返回解析后的 JSON dict。"""
@@ -199,27 +248,43 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     schema_content = schema_file.read_text(encoding="utf-8")
 
     # 6. 调用 AI 评审
-    # 优先 Daytona 沙箱（免费），失败自动回退直连 API
-    # AI_REVIEW_MODE=api 可强制跳过沙箱
+    # 优先级: 本地 Claude CLI（已在沙箱内） > 新建 Daytona 沙箱 > 直连 API
+    # AI_REVIEW_MODE=api 可强制跳过前两者
+    import shutil
     mode = os.environ.get("AI_REVIEW_MODE", "").lower()
+    has_claude_cli = shutil.which("claude") is not None
     can_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
     can_api = bool(os.environ.get("OPENROUTER_API_KEY", ""))
     result_obj = None
     elapsed = 0
+    ai_timeout = int(os.environ.get("CLAUDE_TIMEOUT", str(ai_cfg.get("timeout", 600))))
 
-    if mode != "api" and can_daytona:
+    # 6a. 本地有 claude CLI → 直接跑（已在 Daytona 沙箱内，免费）
+    if mode != "api" and has_claude_cli:
+        print(f"\n--- 本地 Claude CLI --- [{time.time()-t0:.1f}s]")
+        try:
+            result_obj = _call_claude_cli(
+                prompt_content, schema_content, input_text, model,
+                timeout=ai_timeout,
+            )
+            elapsed = time.time() - t0
+        except Exception as e:
+            print(f"Claude CLI 失败: {e}", file=sys.stderr)
+
+    # 6b. 本地没有 CLI，尝试新建 Daytona 沙箱
+    if result_obj is None and mode != "api" and can_daytona and not has_claude_cli:
         print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")
         sandbox_res = ai_cfg.get("sandbox_resources", {})
         run_config = DaytonaRunConfig(
             api_key=os.environ.get("DAYTONA_API_KEY", ""),
             snapshot=os.environ.get("SNAPSHOT_NAME", ai_cfg.get("sandbox_snapshot", "daytona-medium")),
             cpu=sandbox_res.get("cpu", 2),
-            memory=sandbox_res.get("memory", 4),
+            memory=sandbox_res.get("memory", 2),
             disk=sandbox_res.get("disk", 5),
             openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api"),
             openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
             model=model,
-            timeout=int(os.environ.get("CLAUDE_TIMEOUT", str(ai_cfg.get("timeout", 600)))),
+            timeout=ai_timeout,
         )
         try:
             result = run_claude_in_sandbox(run_config, prompt_content, schema_content, input_text)
@@ -231,22 +296,16 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
         except Exception as e:
             print(f"Daytona 沙箱异常: {e}", file=sys.stderr)
 
-        if result_obj is None:
-            if can_api:
-                print("自动回退直连 API ...")
-            else:
-                err = "Daytona 沙箱失败且无 OPENROUTER_API_KEY 可回退"
-                print(err, file=sys.stderr)
-                _save_error_result(err, result_path)
-                return 1
-
+    # 6c. 兜底：直连 API
     if result_obj is None and can_api:
+        if has_claude_cli or can_daytona:
+            print("自动回退直连 API ...")
         print(f"\n--- 直连 API --- [{time.time()-t0:.1f}s]")
         result_obj = _call_api_direct(prompt_content, schema_content, input_text, model)
         elapsed = time.time() - t0
 
     if result_obj is None:
-        print("错误: 无可用的 AI 评审通道（需要 DAYTONA_API_KEY 或 OPENROUTER_API_KEY）", file=sys.stderr)
+        print("错误: 无可用的 AI 评审通道", file=sys.stderr)
         _save_error_result("无可用评审通道", result_path)
         return 1
 
