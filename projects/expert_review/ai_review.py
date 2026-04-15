@@ -199,7 +199,15 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     schema_content = schema_file.read_text(encoding="utf-8")
 
     # 6. 调用 AI 评审
-    use_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
+    # AI_REVIEW_MODE=daytona 强制走沙箱；=api 强制直连；默认有 OPENROUTER_API_KEY 就直连
+    mode = os.environ.get("AI_REVIEW_MODE", "").lower()
+    if mode == "daytona":
+        use_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
+    elif mode == "api":
+        use_daytona = False
+    else:
+        # 默认：有 OpenRouter key 就直连（更快），否则回退 Daytona
+        use_daytona = (not os.environ.get("OPENROUTER_API_KEY", "")) and _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
 
     if use_daytona:
         print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")
