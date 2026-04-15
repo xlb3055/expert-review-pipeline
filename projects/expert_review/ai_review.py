@@ -203,7 +203,10 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     # 已在沙箱内（/workspace/ 路径）时跳过嵌套沙箱，直接调 API
     # AI_REVIEW_MODE=api 可强制跳过沙箱
     mode = os.environ.get("AI_REVIEW_MODE", "").lower()
-    in_sandbox = os.path.exists("/workspace/.daytona")
+    in_sandbox = (
+        os.environ.get("DAYTONA_SANDBOX_ID", "")       # Daytona 注入的环境变量
+        or os.path.abspath(project_dir).startswith("/workspace")  # 工作目录在 /workspace 下
+    )
     can_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "") and not in_sandbox
     can_api = bool(os.environ.get("OPENROUTER_API_KEY", ""))
     result_obj = None
