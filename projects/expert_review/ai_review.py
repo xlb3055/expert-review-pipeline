@@ -199,13 +199,18 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     schema_content = schema_file.read_text(encoding="utf-8")
 
     # 6. 调用 AI 评审
-    # 默认优先 Daytona 沙箱（免费），失败自动回退直连 API
+    # 优先 Daytona 沙箱（免费），失败自动回退直连 API
+    # 已在沙箱内（/workspace/ 路径）时跳过嵌套沙箱，直接调 API
     # AI_REVIEW_MODE=api 可强制跳过沙箱
     mode = os.environ.get("AI_REVIEW_MODE", "").lower()
-    can_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
+    in_sandbox = os.path.exists("/workspace/.daytona")
+    can_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "") and not in_sandbox
     can_api = bool(os.environ.get("OPENROUTER_API_KEY", ""))
     result_obj = None
     elapsed = 0
+
+    if in_sandbox:
+        print("检测到已在 Daytona 沙箱内，跳过嵌套沙箱，直接调 API")
 
     if mode != "api" and can_daytona:
         print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")
@@ -221,17 +226,23 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
             model=model,
             timeout=int(os.environ.get("CLAUDE_TIMEOUT", str(ai_cfg.get("timeout", 600)))),
         )
-        result = run_claude_in_sandbox(run_config, prompt_content, schema_content, input_text)
-        if result.success:
-            result_obj = result.result_json
-            elapsed = result.elapsed_seconds
-        else:
-            print(f"Daytona 沙箱失败: {result.error}", file=sys.stderr)
+        try:
+            result = run_claude_in_sandbox(run_config, prompt_content, schema_content, input_text)
+            if result.success:
+                result_obj = result.result_json
+                elapsed = result.elapsed_seconds
+            else:
+                print(f"Daytona 沙箱失败: {result.error}", file=sys.stderr)
+        except Exception as e:
+            print(f"Daytona 沙箱异常: {e}", file=sys.stderr)
+
+        if result_obj is None:
             if can_api:
                 print("自动回退直连 API ...")
             else:
-                print("无 OPENROUTER_API_KEY，无法回退", file=sys.stderr)
-                _save_error_result(result.error, result_path)
+                err = "Daytona 沙箱失败且无 OPENROUTER_API_KEY 可回退"
+                print(err, file=sys.stderr)
+                _save_error_result(err, result_path)
                 return 1
 
     if result_obj is None and can_api:
