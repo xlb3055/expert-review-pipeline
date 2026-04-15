@@ -32,8 +32,14 @@ from core.feishu_utils import (
     extract_attachment_file_token,
     extract_attachment_url,
 )
-from core.daytona_runner import DaytonaRunConfig, run_claude_in_sandbox
 from core.trace_extractor import extract_user_focused_content
+
+# Daytona 为可选依赖，没装则只走直连 API 模式
+try:
+    from core.daytona_runner import DaytonaRunConfig, run_claude_in_sandbox
+    _HAS_DAYTONA = True
+except ImportError:
+    _HAS_DAYTONA = False
 
 
 def _build_input_text(fields: dict, trace_content: str, config: dict) -> str:
@@ -81,6 +87,39 @@ def _build_input_text(fields: dict, trace_content: str, config: dict) -> str:
     return "\n".join(parts)
 
 
+def _call_api_direct(prompt_content: str, schema_content: str,
+                     input_text: str, model: str) -> dict:
+    """直连 OpenRouter API 完成评审，返回解析后的 JSON dict。"""
+    from openai import OpenAI
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    if not base_url.endswith("/v1"):
+        base_url = base_url.rstrip("/") + "/v1"
+
+    client = OpenAI(base_url=base_url, api_key=api_key)
+
+    schema_obj = json.loads(schema_content)
+    json_schema = {
+        "name": schema_obj.get("name", "expert_review_result"),
+        "strict": schema_obj.get("strict", True),
+        "schema": schema_obj.get("schema", schema_obj.get("parameters", schema_obj)),
+    }
+
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": prompt_content},
+            {"role": "user", "content": input_text},
+        ],
+        response_format={"type": "json_schema", "json_schema": json_schema},
+        timeout=300,
+    )
+
+    raw = resp.choices[0].message.content
+    return json.loads(raw)
+
+
 def run_ai_review(record_id: str, project_dir: str) -> int:
     """
     执行 AI 评审流程。
@@ -105,27 +144,15 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
         workspace.get("ai_review_result_path", "/workspace/ai_review_result.json"),
     )
 
-    # 构建 Daytona 运行配置
-    sandbox_res = ai_cfg.get("sandbox_resources", {})
-    run_config = DaytonaRunConfig(
-        api_key=os.environ.get("DAYTONA_API_KEY", ""),
-        snapshot=os.environ.get("SNAPSHOT_NAME", ai_cfg.get("sandbox_snapshot", "daytona-medium")),
-        cpu=sandbox_res.get("cpu", 2),
-        memory=sandbox_res.get("memory", 4),
-        disk=sandbox_res.get("disk", 5),
-        openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api"),
-        openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
-        model=os.environ.get(
-            "ANTHROPIC_MODEL",
-            os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", ai_cfg.get("model", "") or "anthropic/claude-sonnet-4-6"),
-        ),
-        timeout=int(os.environ.get("CLAUDE_TIMEOUT", str(ai_cfg.get("timeout", 600)))),
+    model = os.environ.get(
+        "ANTHROPIC_MODEL",
+        os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", ai_cfg.get("model", "") or "anthropic/claude-sonnet-4-6"),
     )
 
     t0 = time.time()
     print("===== AI 评审开始 =====")
     print(f"Record ID (主表): {record_id}")
-    print(f"模型: {run_config.model}")
+    print(f"模型: {model}")
 
     # 1. 从主表获取记录
     print("\n--- 从主表获取记录 ---")
@@ -171,16 +198,34 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     prompt_content = prompt_file.read_text(encoding="utf-8")
     schema_content = schema_file.read_text(encoding="utf-8")
 
-    # 6. 在 Daytona 沙箱中执行 Claude
-    print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")
-    result = run_claude_in_sandbox(run_config, prompt_content, schema_content, input_text)
+    # 6. 调用 AI 评审
+    use_daytona = _HAS_DAYTONA and os.environ.get("DAYTONA_API_KEY", "")
 
-    if not result.success:
-        print(f"AI 评审失败: {result.error}", file=sys.stderr)
-        _save_error_result(result.error, result_path)
-        return 1
-
-    result_obj = result.result_json
+    if use_daytona:
+        print(f"\n--- 调用 Daytona 沙箱 --- [{time.time()-t0:.1f}s]")
+        sandbox_res = ai_cfg.get("sandbox_resources", {})
+        run_config = DaytonaRunConfig(
+            api_key=os.environ.get("DAYTONA_API_KEY", ""),
+            snapshot=os.environ.get("SNAPSHOT_NAME", ai_cfg.get("sandbox_snapshot", "daytona-medium")),
+            cpu=sandbox_res.get("cpu", 2),
+            memory=sandbox_res.get("memory", 4),
+            disk=sandbox_res.get("disk", 5),
+            openrouter_base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api"),
+            openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+            model=model,
+            timeout=int(os.environ.get("CLAUDE_TIMEOUT", str(ai_cfg.get("timeout", 600)))),
+        )
+        result = run_claude_in_sandbox(run_config, prompt_content, schema_content, input_text)
+        if not result.success:
+            print(f"AI 评审失败: {result.error}", file=sys.stderr)
+            _save_error_result(result.error, result_path)
+            return 1
+        result_obj = result.result_json
+        elapsed = result.elapsed_seconds
+    else:
+        print(f"\n--- 直连 API --- [{time.time()-t0:.1f}s]")
+        result_obj = _call_api_direct(prompt_content, schema_content, input_text, model)
+        elapsed = time.time() - t0
 
     # 7. 解包 schema 包装
     if "expert_review_result" in result_obj and "expert_ability" not in result_obj:
@@ -194,7 +239,7 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
         json.dump(result_obj, f, ensure_ascii=False, indent=2)
     print(f"\nAI 评审结果已保存: {result_path}")
     print(f"结果内容:\n{json.dumps(result_obj, ensure_ascii=False, indent=2)[:1000]}")
-    print(f"总耗时: {result.elapsed_seconds:.1f}s")
+    print(f"总耗时: {elapsed:.1f}s")
 
     return 0
 

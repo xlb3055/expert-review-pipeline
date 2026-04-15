@@ -126,12 +126,19 @@
 
 请输出一个 JSON 对象，包含：
 
-1. **expert_ability**：专家能力模块，含三个维度分数和证据，以及总分（0-10）
-2. **trace_asset**：Trace 资产模块，含六个维度分数和证据，以及总分（0-12）
-3. **overall_assessment**：中文 2-5 句话整体评估
+1. **expert_ability**：专家能力模块，含三个维度分数、证据、优化建议，以及总分（0-10）
+2. **trace_asset**：Trace 资产模块，含六个维度分数、证据、优化建议，以及总分（0-12）
+3. **overall_assessment**：中文整体评估（要求见下方）
 4. **trace_highlights**：1-3 个值得关注的 Trace 亮点
 
-**证据引用格式**：直接引用 trace 中专家（human）的原始消息或描述 AI（assistant）的关键行为，说明该证据如何支持你的评分。
+## 每个维度的三个字段
+
+- **evidence（打分理由）**：直接引用 trace 中专家（human）的原始消息或描述 AI（assistant）的关键行为，说明该证据如何支持你的评分。要具体，引用轮次编号和原文。
+- **suggestion（优化建议）**：针对该维度的扣分点，给出 1-2 条具体可操作的优化建议。告诉专家"下次怎么做能拿到更高分"。满分维度可写"无，当前表现优秀"。
+
+## overall_assessment 总结要求
+
+overall_assessment 为 1-3 句话的简要总评，概括该专家的核心优势与主要不足。不需要逐维度展开（逐维度已有 evidence 和 suggestion），只做整体定性。
 
 # 五、评分原则
 

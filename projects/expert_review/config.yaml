@@ -42,14 +42,16 @@ ai_review:
     disk: 5
 
 scoring:
+  # 综合分 = 能力分百分比 * 50% + 资产分百分比 * 50%，>= pass_score 为通过
+  pass_score: 70
   expert_ability:
-    pass_threshold: 7
+    max_total: 10
     dimensions:
       - { key: task_complexity, max_score: 3 }
       - { key: iteration_quality, max_score: 3 }
       - { key: professional_judgment, max_score: 4 }
   trace_asset:
-    high_value_threshold: 9
+    max_total: 12
     dimensions:
       - { key: authenticity, max_score: 2 }
       - { key: info_density, max_score: 2 }
@@ -68,7 +70,8 @@ field_mapping:
   final_product: "最终产物"      # 主表是附件类型
   original_product: "原始产物"
   review_status: "审核状态"      # 回填目标
-  machine_review_note: "机审说明" # 回填目标
+  machine_review_note: "机审说明" # 回填目标（详细逐维度解析）
+  machine_review_remark: "机审备注" # 回填目标（结论 + 给专家看的人话反馈）
 
 # 主表审核状态映射
 conclusion_to_status:

@@ -62,59 +62,129 @@ def extract_scores(ai_result: dict, module_key: str, dimensions: list) -> dict:
     return scores
 
 
-def determine_conclusion(expert_total: int, trace_total: int,
-                         pre_screen_status: str) -> str:
-    """
-    根据双模块分数和粗筛状态判定最终结论。
+def compute_composite_score(expert_total: int, trace_total: int,
+                            expert_max: int = 10, trace_max: int = 12) -> float:
+    """综合分 = 能力分百分比 * 50% + 资产分百分比 * 50%，返回 0-100。"""
+    expert_pct = (expert_total / expert_max * 100) if expert_max else 0
+    trace_pct = (trace_total / trace_max * 100) if trace_max else 0
+    return round(expert_pct * 0.5 + trace_pct * 0.5, 1)
 
-    - 粗筛拒绝 → 拒绝
-    - 专家能力 >= 7 → 可储备专家
-    - Trace 资产 >= 9 → 高价值trace
-    - 两者同时满足 → 可储备专家 + 高价值trace
-    - 专家能力 >= 5 或 Trace 资产 >= 6 → 待人工复核
-    - 否则 → 拒绝
+
+def determine_conclusion(expert_total: int, trace_total: int,
+                         pre_screen_status: str,
+                         pass_score: float = 70,
+                         expert_max: int = 10, trace_max: int = 12) -> tuple:
+    """
+    根据综合分判定通过/不通过。
+
+    返回: (conclusion_str, composite_score)
     """
     if pre_screen_status == "拒绝":
-        return "拒绝"
+        return "不通过", 0.0
 
-    labels = []
-    if expert_total >= 7:
-        labels.append("可储备专家")
-    if trace_total >= 9:
-        labels.append("高价值trace")
+    score = compute_composite_score(expert_total, trace_total, expert_max, trace_max)
 
-    if labels:
-        return " + ".join(labels)
-    elif expert_total >= 5 or trace_total >= 6:
-        return "待人工复核"
+    if score >= pass_score:
+        return "通过", score
     else:
-        return "拒绝"
+        return "不通过", score
 
 
-def _build_machine_note(conclusion: str, expert_scores: dict, trace_scores: dict,
+EXPERT_DIM_LABELS = {
+    "task_complexity": ("任务复杂度", 3),
+    "iteration_quality": ("迭代质量", 3),
+    "professional_judgment": ("专业判断", 4),
+}
+TRACE_DIM_LABELS = {
+    "authenticity": ("真实性", 2),
+    "info_density": ("信息密度", 2),
+    "tool_loop": ("工具闭环", 2),
+    "correction_value": ("纠偏价值", 2),
+    "verification_loop": ("验证闭环", 2),
+    "compliance": ("合规可用性", 2),
+}
+
+
+def _build_machine_note(expert_scores: dict, trace_scores: dict,
                         ai_result: dict) -> str:
-    """组装机审说明文本。"""
-    expert_total = expert_scores["total"]
-    trace_total = trace_scores["total"]
+    """机审说明：纯逐项解析，不含结论。"""
+    expert_data = ai_result.get("expert_ability", {})
+    trace_data = ai_result.get("trace_asset", {})
 
     lines = [
-        f"【AI机审结论】{conclusion}",
-        f"专家能力分: {expert_total}/10 "
+        f"专家能力分: {expert_scores['total']}/10 "
         f"(复杂度{expert_scores.get('task_complexity', 0)}/3, "
         f"迭代{expert_scores.get('iteration_quality', 0)}/3, "
         f"判断{expert_scores.get('professional_judgment', 0)}/4)",
-        f"Trace资产分: {trace_total}/12 "
+    ]
+    lines.append("")
+    for key, (label, max_s) in EXPERT_DIM_LABELS.items():
+        dim = expert_data.get(key, {})
+        score = dim.get("score", expert_scores.get(key, 0)) if isinstance(dim, dict) else expert_scores.get(key, 0)
+        evidence = dim.get("evidence", "") if isinstance(dim, dict) else ""
+        suggestion = dim.get("suggestion", "") if isinstance(dim, dict) else ""
+        lines.append(f"▸ {label}: {score}/{max_s}")
+        if evidence:
+            lines.append(f"  理由: {evidence}")
+        if suggestion:
+            lines.append(f"  建议: {suggestion}")
+
+    lines.append("")
+    lines.append(
+        f"Trace资产分: {trace_scores['total']}/12 "
         f"(真实{trace_scores.get('authenticity', 0)}/2, "
         f"密度{trace_scores.get('info_density', 0)}/2, "
         f"工具{trace_scores.get('tool_loop', 0)}/2, "
         f"纠偏{trace_scores.get('correction_value', 0)}/2, "
         f"验证{trace_scores.get('verification_loop', 0)}/2, "
-        f"合规{trace_scores.get('compliance', 0)}/2)",
-    ]
+        f"合规{trace_scores.get('compliance', 0)}/2)"
+    )
+    lines.append("")
+    for key, (label, max_s) in TRACE_DIM_LABELS.items():
+        dim = trace_data.get(key, {})
+        score = dim.get("score", trace_scores.get(key, 0)) if isinstance(dim, dict) else trace_scores.get(key, 0)
+        evidence = dim.get("evidence", "") if isinstance(dim, dict) else ""
+        suggestion = dim.get("suggestion", "") if isinstance(dim, dict) else ""
+        lines.append(f"▸ {label}: {score}/{max_s}")
+        if evidence:
+            lines.append(f"  理由: {evidence}")
+        if suggestion:
+            lines.append(f"  建议: {suggestion}")
 
+    return "\n".join(lines)
+
+
+def _build_machine_remark(conclusion: str, composite_score: float,
+                          expert_scores: dict, trace_scores: dict,
+                          ai_result: dict, pass_score: float = 70) -> str:
+    """机审备注：结论 + 简短人话反馈，发给专家看的。"""
+    expert_data = ai_result.get("expert_ability", {})
+    trace_data = ai_result.get("trace_asset", {})
     overall = ai_result.get("overall_assessment", "")
-    if overall:
-        lines.append(f"综合评价: {overall}")
+
+    lines = [f"结论: {conclusion}（综合评分 {composite_score:.0f}）"]
+
+    if conclusion == "通过":
+        if overall:
+            lines.append(overall)
+        else:
+            lines.append("整体表现良好，符合要求。")
+    else:
+        if overall:
+            lines.append(overall)
+        else:
+            lines.append(f"综合评分未达及格线（{pass_score:.0f}），请参考以下方向改进。")
+        # 只列出明显不足的维度名称和简短方向，不贴详细 suggestion
+        weak = []
+        all_dims = list(EXPERT_DIM_LABELS.items()) + list(TRACE_DIM_LABELS.items())
+        for key, (label, max_s) in all_dims:
+            data = expert_data if key in EXPERT_DIM_LABELS else trace_data
+            dim = data.get(key, {})
+            s = dim.get("score", 0) if isinstance(dim, dict) else 0
+            if s / max_s < 0.5 if max_s else False:
+                weak.append(label)
+        if weak:
+            lines.append(f"建议重点提升: {'、'.join(weak)}")
 
     return "\n".join(lines)
 
@@ -190,35 +260,35 @@ def run_writeback(record_id: str, project_dir: str) -> int:
     print(f"  总分: {trace_scores['total']}/12")
 
     # 4. 判定最终结论
-    conclusion = determine_conclusion(
+    pass_score = scoring.get("pass_score", 70)
+    expert_max = expert_cfg.get("max_total", 10)
+    trace_max = trace_cfg.get("max_total", 12)
+    conclusion, composite_score = determine_conclusion(
         expert_scores["total"], trace_scores["total"], pre_screen_status,
+        pass_score=pass_score, expert_max=expert_max, trace_max=trace_max,
     )
-    print(f"\n最终结论: {conclusion}")
+    print(f"\n综合分: {composite_score:.0f}/100 → {conclusion}")
 
-    # 5. 结论 → 主表审核状态映射
-    if conclusion == "拒绝":
-        main_status = conclusion_map.get("reject", "已拒绝")
-    elif "待人工复核" in conclusion:
-        main_status = conclusion_map.get("manual_review", "初审中")
-    else:
-        main_status = conclusion_map.get("pass", "最终审核通过")
+    # 5. 组装机审说明（详细）+ 机审备注（人话）
+    machine_note = _build_machine_note(expert_scores, trace_scores, ai_result)
+    machine_remark = _build_machine_remark(
+        conclusion, composite_score, expert_scores, trace_scores,
+        ai_result, pass_score=pass_score,
+    )
 
-    # 6. 组装机审说明
-    machine_note = _build_machine_note(conclusion, expert_scores, trace_scores, ai_result)
-
-    # 7. 回填主表
+    # 6. 回填主表（只写机审说明+机审备注，不改审核状态）
     print("\n--- 主表回填 ---")
-    review_status_field = mfm.get("review_status", "审核状态")
     machine_note_field = mfm.get("machine_review_note", "机审说明")
+    machine_remark_field = mfm.get("machine_review_remark", "机审备注")
 
     try:
         client.update_record(app_token, table_id, record_id, {
-            review_status_field: main_status,
             machine_note_field: machine_note,
+            machine_remark_field: machine_remark,
         })
         print(f"主表回填成功:")
-        print(f"  {review_status_field}: {main_status}")
         print(f"  {machine_note_field}: ({len(machine_note)} 字符)")
+        print(f"  {machine_remark_field}: ({len(machine_remark)} 字符)")
     except Exception as e:
         print(f"主表回填失败: {e}", file=sys.stderr)
         return 1
