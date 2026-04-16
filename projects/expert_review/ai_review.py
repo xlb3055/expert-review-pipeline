@@ -308,8 +308,16 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
 
     # 7. 统一解包执行器/模型包装
     raw_keys = list(result_obj.keys()) if isinstance(result_obj, dict) else []
+    raw_preview = (
+        json.dumps(result_obj, ensure_ascii=False, indent=2)[:2000]
+        if isinstance(result_obj, (dict, list))
+        else str(result_obj)[:2000]
+    )
     result_obj = normalize_ai_result(result_obj)
     if not isinstance(result_obj, dict) or not result_obj:
+        if raw_keys:
+            print(f"AI 评审原始结果键: {raw_keys}", file=sys.stderr)
+        print(f"AI 评审原始结果预览:\n{raw_preview}", file=sys.stderr)
         print("错误: AI 评审结果为空或无法解包", file=sys.stderr)
         _save_error_result("AI 评审结果为空或无法解包", result_path)
         return 1

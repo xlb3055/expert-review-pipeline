@@ -514,6 +514,55 @@ class TestWritebackLogic(unittest.TestCase):
         self.assertEqual(scores["professional_judgment"], 4)
         self.assertEqual(scores["total"], 9)
 
+    def test_normalize_ai_result_from_nested_text_block(self):
+        from projects.expert_review.result_utils import normalize_ai_result
+
+        wrapped = {
+            "type": "result",
+            "message": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "以下是评审结果：\n"
+                            "{\"expert_review_result\":{\"expert_ability\":{\"task_complexity\":{\"score\":2},"
+                            "\"iteration_quality\":{\"score\":2},\"professional_judgment\":{\"score\":3},"
+                            "\"total\":7},\"trace_asset\":{\"authenticity\":{\"score\":2},"
+                            "\"info_density\":{\"score\":2},\"tool_loop\":{\"score\":2},"
+                            "\"correction_value\":{\"score\":1},\"verification_loop\":{\"score\":2},"
+                            "\"compliance\":{\"score\":2},\"total\":11}}}\n"
+                            "请查收。"
+                        ),
+                    }
+                ]
+            },
+        }
+
+        normalized = normalize_ai_result(wrapped)
+        self.assertEqual(normalized["expert_ability"]["total"], 7)
+        self.assertEqual(normalized["trace_asset"]["total"], 11)
+
+    def test_normalize_ai_result_from_result_text_with_prefix_suffix(self):
+        from projects.expert_review.result_utils import normalize_ai_result
+
+        wrapped = {
+            "type": "result",
+            "result": (
+                "我会严格按 schema 返回。\n"
+                "{\"expert_ability\":{\"task_complexity\":{\"score\":1},"
+                "\"iteration_quality\":{\"score\":2},\"professional_judgment\":{\"score\":3},"
+                "\"total\":6},\"trace_asset\":{\"authenticity\":{\"score\":2},"
+                "\"info_density\":{\"score\":1},\"tool_loop\":{\"score\":2},"
+                "\"correction_value\":{\"score\":1},\"verification_loop\":{\"score\":1},"
+                "\"compliance\":{\"score\":2},\"total\":9}}\n"
+                "以上。"
+            ),
+        }
+
+        normalized = normalize_ai_result(wrapped)
+        self.assertEqual(normalized["expert_ability"]["professional_judgment"]["score"], 3)
+        self.assertEqual(normalized["trace_asset"]["compliance"]["score"], 2)
+
     # --- 新结论判定逻辑 ---
 
     def test_conclusion_pass_when_composite_reaches_threshold(self):
