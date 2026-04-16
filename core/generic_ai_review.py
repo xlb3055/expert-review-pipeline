@@ -309,14 +309,28 @@ def unwrap_schema_envelope(result_obj: Any, schema_payload: Mapping[str, Any]) -
         if not unwrapped:
             break
 
-    # 清理 schema 中未声明的多余字段（如 CLI 包装层残留的 error/type 等）
-    root_schema = schema_payload.get("schema", {})
-    if root_schema.get("additionalProperties") is False and root_prop_keys:
-        extra_keys = set(result_obj.keys()) - root_prop_keys
-        for key in extra_keys:
-            del result_obj[key]
+    # 递归清理 schema 中未声明的多余字段
+    _strip_extra_fields(result_obj, schema_payload.get("schema", {}))
 
     return result_obj
+
+
+def _strip_extra_fields(obj: Any, schema: Mapping[str, Any]) -> None:
+    """递归删除 additionalProperties:false 的 object 中未声明的字段。"""
+    if not isinstance(obj, dict) or not isinstance(schema, Mapping):
+        return
+    if schema.get("type") != "object":
+        return
+    props = schema.get("properties")
+    if not isinstance(props, Mapping):
+        return
+    if schema.get("additionalProperties") is False:
+        for key in list(obj.keys()):
+            if key not in props:
+                del obj[key]
+    for key, sub_schema in props.items():
+        if key in obj and isinstance(sub_schema, Mapping):
+            _strip_extra_fields(obj[key], sub_schema)
 
 
 def _auto_fill_totals(result_obj: dict[str, Any], schema_payload: Mapping[str, Any]) -> None:
