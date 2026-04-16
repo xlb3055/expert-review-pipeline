@@ -13,7 +13,9 @@ from core.config_loader import load_project_config, get_field_name
 from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
+    extract_attachment_entries,
     extract_attachment_file_token,
+    extract_attachment_file_tokens,
     extract_attachment_url,
     extract_link_url,
 )

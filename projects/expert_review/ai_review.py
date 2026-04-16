@@ -29,9 +29,9 @@ from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
     extract_link_url,
-    extract_attachment_file_token,
-    extract_attachment_url,
+    extract_attachment_file_tokens,
 )
+from core.trace_bundle import download_and_merge_trace_attachments
 from core.trace_extractor import extract_user_focused_content
 from projects.expert_review.result_utils import normalize_ai_result
 
@@ -210,14 +210,17 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
         print("\n--- Trace 文件不存在，重新下载 ---")
         trace_field_name = get_field_name(config, "trace_file")
         trace_field = fields.get(trace_field_name)
-        file_token = extract_attachment_file_token(trace_field)
-        if file_token:
+        file_tokens = extract_attachment_file_tokens(trace_field)
+        if file_tokens:
             output_dir = os.path.dirname(trace_input_path)
             if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
-            download_url = extract_attachment_url(trace_field)
-            client.download_attachment(file_token, trace_input_path,
-                                       download_url=download_url or None)
+            bundle = download_and_merge_trace_attachments(
+                client, trace_field, trace_input_path
+            )
+            print(f"Trace 附件数量: {bundle.attachment_count}")
+            print(f"Trace 附件列表: {', '.join(bundle.attachment_names)}")
+            print(f"Trace 合并文件: {trace_input_path} ({bundle.total_bytes} 字节)")
         else:
             print("警告: 主表中未找到 Trace 附件", file=sys.stderr)
 

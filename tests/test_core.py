@@ -175,6 +175,16 @@ class TestFeishuUtils(unittest.TestCase):
         self.assertIsNone(extract_attachment_file_token(None))
         self.assertIsNone(extract_attachment_file_token("string"))
 
+    def test_extract_attachment_entries_and_tokens(self):
+        from core.feishu_utils import extract_attachment_entries, extract_attachment_file_tokens
+        field_value = [
+            {"file_token": "abc123", "name": "trace1.jsonl"},
+            {"name": "invalid"},
+            {"file_token": "def456", "name": "trace2.jsonl"},
+        ]
+        self.assertEqual(len(extract_attachment_entries(field_value)), 3)
+        self.assertEqual(extract_attachment_file_tokens(field_value), ["abc123", "def456"])
+
     def test_extract_link_url(self):
         from core.feishu_utils import extract_link_url
         self.assertEqual(extract_link_url({"link": "https://example.com"}), "https://example.com")
@@ -289,6 +299,45 @@ class TestTraceParser(unittest.TestCase):
         finally:
             os.unlink(path)
 
+
+class TestTraceBundle(unittest.TestCase):
+    """测试 core/trace_bundle.py"""
+
+    def test_download_and_merge_trace_attachments(self):
+        from core.trace_bundle import download_and_merge_trace_attachments
+
+        class FakeClient:
+            def __init__(self, payloads):
+                self.payloads = payloads
+
+            def download_attachment(self, file_token, output_path, download_url=None):
+                with open(output_path, "wb") as f:
+                    f.write(self.payloads[file_token])
+
+        tmpdir = tempfile.mkdtemp()
+        output_path = os.path.join(tmpdir, "trace.jsonl")
+        trace_field = [
+            {"file_token": "a1", "name": "trace_a.jsonl"},
+            {"file_token": "b2", "name": "trace_b.jsonl"},
+        ]
+        client = FakeClient({
+            "a1": b'{"type":"human","content":"first"}\n',
+            "b2": b'{"type":"human","content":"second"}',
+        })
+
+        try:
+            bundle = download_and_merge_trace_attachments(client, trace_field, output_path)
+            self.assertEqual(bundle.attachment_count, 2)
+            self.assertEqual(bundle.attachment_names, ["trace_a.jsonl", "trace_b.jsonl"])
+            self.assertTrue(os.path.isfile(output_path))
+            with open(output_path, "rb") as f:
+                merged = f.read()
+            self.assertIn(b'{"type":"human","content":"first"}\n', merged)
+            self.assertIn(b'{"type":"human","content":"second"}\n', merged)
+        finally:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+            os.rmdir(tmpdir)
 
 class TestDaytonaRunnerDataClasses(unittest.TestCase):
     """测试 core/daytona_runner.py 的数据类和 JSON 修复函数"""

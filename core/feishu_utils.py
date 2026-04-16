@@ -172,21 +172,37 @@ def normalize_field_value(value) -> str:
     return str(value)
 
 
+def extract_attachment_entries(field_value) -> list:
+    """从飞书附件字段值中提取附件字典列表。"""
+    if isinstance(field_value, list):
+        return [item for item in field_value if isinstance(item, dict)]
+    if isinstance(field_value, dict):
+        return [field_value]
+    return []
+
+
+def extract_attachment_file_tokens(field_value) -> list:
+    """从飞书附件字段值中提取全部 file_token。"""
+    tokens = []
+    for entry in extract_attachment_entries(field_value):
+        token = entry.get("file_token")
+        if token:
+            tokens.append(token)
+    return tokens
+
+
 def extract_attachment_file_token(field_value):
-    """从飞书附件字段值中提取第一个 file_token。"""
-    if isinstance(field_value, list) and field_value:
-        first = field_value[0]
-        if isinstance(first, dict):
-            return first.get("file_token")
-    return None
+    """从飞书附件字段值中提取第一个有效 file_token。"""
+    tokens = extract_attachment_file_tokens(field_value)
+    return tokens[0] if tokens else None
 
 
 def extract_attachment_url(field_value) -> str:
-    """从飞书附件字段值中提取第一个附件的 url（bitable 附件自带下载地址）。"""
-    if isinstance(field_value, list) and field_value:
-        first = field_value[0]
-        if isinstance(first, dict):
-            return first.get("url", "") or first.get("tmp_url", "")
+    """从飞书附件字段值中提取第一个有效附件的 url。"""
+    for entry in extract_attachment_entries(field_value):
+        url = entry.get("url", "") or entry.get("tmp_url", "")
+        if url:
+            return url
     return ""
 
 

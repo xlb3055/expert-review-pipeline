@@ -34,9 +34,10 @@ from core.feishu_utils import (
     FeishuClient,
     normalize_field_value,
     extract_attachment_file_token,
-    extract_attachment_url,
+    extract_attachment_file_tokens,
     extract_link_url,
 )
+from core.trace_bundle import download_and_merge_trace_attachments
 from core.trace_parser import TraceAnalysis, parse_trace_file
 from core.trace_extractor import extract_user_focused_content
 
@@ -96,9 +97,9 @@ def check_trace_integrity(fields: dict, trace_field_name: str,
                            trace: TraceAnalysis, min_rounds: int) -> dict:
     """检查 2: Trace 存在 + 可解析 + 轮次 >= min_rounds。"""
     trace_field = fields.get(trace_field_name)
-    file_token = extract_attachment_file_token(trace_field)
+    file_tokens = extract_attachment_file_tokens(trace_field)
 
-    if not file_token:
+    if not file_tokens:
         return {
             "check": "trace_integrity",
             "passed": False,
@@ -293,19 +294,22 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     # 下载 Trace 附件
     trace_field_name = get_field_name(config, "trace_file")
     trace_field = fields.get(trace_field_name)
-    file_token = extract_attachment_file_token(trace_field)
+    file_tokens = extract_attachment_file_tokens(trace_field)
     trace = TraceAnalysis()
     clean_trace = ""
 
-    if file_token:
+    if file_tokens:
         print("\n--- 下载 Trace 附件 ---")
         output_dir = os.path.dirname(trace_output_path)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
         try:
-            download_url = extract_attachment_url(trace_field)
-            client.download_attachment(file_token, trace_output_path,
-                                       download_url=download_url or None)
+            bundle = download_and_merge_trace_attachments(
+                client, trace_field, trace_output_path
+            )
+            print(f"Trace 附件数量: {bundle.attachment_count}")
+            print(f"Trace 附件列表: {', '.join(bundle.attachment_names)}")
+            print(f"Trace 合并文件: {trace_output_path} ({bundle.total_bytes} 字节)")
             trace = parse_trace_file(trace_output_path)
             print(f"Trace 解析结果: 轮次={trace.conversation_rounds}, 模型={trace.model_name}, "
                   f"工具调用={trace.tool_call_count}, 总行数={trace.total_lines}")
