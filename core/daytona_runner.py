@@ -16,28 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-try:
-    from daytona_sdk import (
-        CreateSandboxFromSnapshotParams,
-        Daytona,
-        DaytonaConfig,
-        DaytonaError,
-        DaytonaNotFoundError,
-        Resources,
-        SandboxState,
-        SessionExecuteRequest,
-    )
-except ImportError:
-    from daytona import (
-        CreateSandboxFromSnapshotParams,
-        Daytona,
-        DaytonaConfig,
-        DaytonaError,
-        DaytonaNotFoundError,
-        Resources,
-        SandboxState,
-        SessionExecuteRequest,
-    )
+_DAYTONA_SYMBOLS = None
 
 
 # ========== 数据类 ==========
@@ -228,6 +207,55 @@ def _try_repair_json(raw: str) -> str:
     return raw
 
 
+def _load_daytona_symbols():
+    """延迟导入 daytona SDK，避免无依赖环境下 import 失败。"""
+    global _DAYTONA_SYMBOLS
+    if _DAYTONA_SYMBOLS is not None:
+        return _DAYTONA_SYMBOLS
+
+    errors = []
+    for module_name in ("daytona_sdk", "daytona"):
+        try:
+            if module_name == "daytona_sdk":
+                from daytona_sdk import (
+                    CreateSandboxFromSnapshotParams,
+                    Daytona,
+                    DaytonaConfig,
+                    DaytonaError,
+                    DaytonaNotFoundError,
+                    Resources,
+                    SandboxState,
+                    SessionExecuteRequest,
+                )
+            else:
+                from daytona import (
+                    CreateSandboxFromSnapshotParams,
+                    Daytona,
+                    DaytonaConfig,
+                    DaytonaError,
+                    DaytonaNotFoundError,
+                    Resources,
+                    SandboxState,
+                    SessionExecuteRequest,
+                )
+            _DAYTONA_SYMBOLS = (
+                CreateSandboxFromSnapshotParams,
+                Daytona,
+                DaytonaConfig,
+                DaytonaError,
+                DaytonaNotFoundError,
+                Resources,
+                SandboxState,
+                SessionExecuteRequest,
+            )
+            return _DAYTONA_SYMBOLS
+        except ImportError as exc:
+            errors.append(exc)
+
+    last_error = errors[-1] if errors else ImportError("daytona sdk not found")
+    raise RuntimeError("未安装 daytona-sdk/daytona，请先安装 daytona-sdk") from last_error
+
+
 # ========== 主执行函数 ==========
 
 def run_claude_in_sandbox(
@@ -253,6 +281,21 @@ def run_claude_in_sandbox(
         return result
     if not config.openrouter_api_key:
         result.error = "OPENROUTER_API_KEY 未设置"
+        return result
+
+    try:
+        (
+            CreateSandboxFromSnapshotParams,
+            Daytona,
+            DaytonaConfig,
+            DaytonaError,
+            DaytonaNotFoundError,
+            Resources,
+            SandboxState,
+            SessionExecuteRequest,
+        ) = _load_daytona_symbols()
+    except RuntimeError as e:
+        result.error = str(e)
         return result
 
     remote_tmp = "/tmp/claude_run"

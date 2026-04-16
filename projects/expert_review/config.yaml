@@ -86,3 +86,4 @@ workspace:
   trace_path: "/workspace/trace.jsonl"
   pre_screen_result_path: "/workspace/pre_screen_result.json"
   ai_review_result_path: "/workspace/ai_review_result.json"
+  ai_review_error_path: "/workspace/ai_review_error.json"

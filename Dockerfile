@@ -7,4 +7,4 @@
 FROM meetchances-cn-beijing.cr.volces.com/ci/common:1.0.5
 
 # 预装流水线依赖，避免每次运行都下载
-RUN pip install --no-cache-dir requests daytona-sdk pyyaml anthropic
+RUN pip install --no-cache-dir requests daytona-sdk pyyaml anthropic openai jsonschema

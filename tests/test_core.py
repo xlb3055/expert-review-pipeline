@@ -342,6 +342,11 @@ class TestTraceBundle(unittest.TestCase):
 class TestDaytonaRunnerDataClasses(unittest.TestCase):
     """测试 core/daytona_runner.py 的数据类和 JSON 修复函数"""
 
+    def test_daytona_runner_import_without_sdk(self):
+        import core.daytona_runner as dr
+        self.assertTrue(hasattr(dr, "DaytonaRunConfig"))
+        self.assertTrue(hasattr(dr, "run_claude_in_sandbox"))
+
     def test_daytona_run_config_defaults(self):
         from core.daytona_runner import DaytonaRunConfig
         cfg = DaytonaRunConfig()

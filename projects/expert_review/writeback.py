@@ -18,6 +18,7 @@ import sys
 
 from core.config_loader import load_project_config
 from core.feishu_utils import FeishuClient
+from core.review_result_validator import validate_ai_review_result
 from projects.expert_review.result_utils import normalize_ai_result
 
 
@@ -195,6 +196,20 @@ def _build_machine_remark(conclusion: str, composite_score: float,
     return "\n".join(lines)
 
 
+def _build_invalid_ai_result_note(reason: str, ai_review_path: str) -> str:
+    """AI 评审结果缺失或异常时，给内部排障用的详细说明。"""
+    return "\n".join([
+        "AI 评审结果不可用，已建议人工复核。",
+        f"原因: {reason}",
+        f"结果文件: {ai_review_path}",
+    ])
+
+
+def _build_invalid_ai_result_remark() -> str:
+    """AI 评审结果异常时，给专家侧看的简短备注。"""
+    return "机审结果异常，请人工复核。"
+
+
 def run_writeback(record_id: str, project_dir: str) -> int:
     """
     执行结果回填主表。
@@ -242,14 +257,45 @@ def run_writeback(record_id: str, project_dir: str) -> int:
 
     # 2. 读取 AI 评审结果
     print("\n--- 读取 AI 评审结果 ---")
+    ai_result = {}
+    ai_review_missing = False
     try:
         raw_ai_result = read_json_file(ai_review_path)
         print(f"AI 评审结果键: {list(raw_ai_result.keys())}")
         ai_result = normalize_ai_result(raw_ai_result)
         print(f"解包后结果键: {list(ai_result.keys())}")
+    except FileNotFoundError:
+        print(f"AI 评审结果文件不存在: {ai_review_path}（AI 评审阶段可能失败）", file=sys.stderr)
+        ai_review_missing = True
     except Exception as e:
         print(f"读取 AI 评审结果失败: {e}", file=sys.stderr)
-        ai_result = {}
+
+    if ai_review_missing:
+        ai_result_reason = "AI 评审结果文件不存在，AI 评审阶段可能未成功执行"
+        ai_result_ok = False
+    else:
+        ai_result_ok, ai_result_reason = validate_ai_review_result(
+            ai_result, expert_dims, trace_dims,
+        )
+    if not ai_result_ok:
+        print(f"AI 评审结果不可用: {ai_result_reason}", file=sys.stderr)
+        machine_note = _build_invalid_ai_result_note(ai_result_reason, ai_review_path)
+        machine_remark = _build_invalid_ai_result_remark()
+        machine_note_field = mfm.get("machine_review_note", "机审说明")
+        machine_remark_field = mfm.get("machine_review_remark", "机审备注")
+        try:
+            client.update_record(app_token, table_id, record_id, {
+                machine_note_field: machine_note,
+                machine_remark_field: machine_remark,
+            })
+            print("主表回填成功（AI 结果异常兜底）:")
+            print(f"  {machine_note_field}: ({len(machine_note)} 字符)")
+            print(f"  {machine_remark_field}: ({len(machine_remark)} 字符)")
+        except Exception as e:
+            print(f"主表回填失败: {e}", file=sys.stderr)
+            return 1
+        print("\n===== 结果回填完成 =====")
+        return 0
 
     # 3. 提取双模块分数
     expert_scores = extract_scores(ai_result, "expert_ability", expert_dims)

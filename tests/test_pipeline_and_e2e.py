@@ -638,5 +638,107 @@ class TestAIReviewInputBuild(unittest.TestCase):
         self.assertNotIn("最终产物链接", text)  # 没有链接则不输出该节
 
 
+class TestAIReviewWrapperIntegration(unittest.TestCase):
+    """验证 expert_review 的包装层会把输入交给通用 AI 评审节点。"""
+
+    def _valid_ai_result(self):
+        return {
+            "expert_ability": {
+                "task_complexity": {"score": 2, "evidence": "...", "suggestion": "无，当前表现优秀"},
+                "iteration_quality": {"score": 2, "evidence": "...", "suggestion": "无，当前表现优秀"},
+                "professional_judgment": {"score": 3, "evidence": "...", "suggestion": "无，当前表现优秀"},
+                "total": 7,
+            },
+            "trace_asset": {
+                "authenticity": {"score": 2, "evidence": "...", "suggestion": "无，当前表现优秀"},
+                "info_density": {"score": 2, "evidence": "...", "suggestion": "无，当前表现优秀"},
+                "tool_loop": {"score": 1, "evidence": "...", "suggestion": "补充更多验证动作"},
+                "correction_value": {"score": 1, "evidence": "...", "suggestion": "补充更多纠偏反馈"},
+                "verification_loop": {"score": 2, "evidence": "...", "suggestion": "无，当前表现优秀"},
+                "compliance": {"score": 2, "evidence": "...", "suggestion": "无，当前表现优秀"},
+                "total": 10,
+            },
+            "overall_assessment": "整体较好。",
+            "trace_highlights": ["有真实 trace 闭环"],
+        }
+
+    def test_run_ai_review_uses_generic_runner(self):
+        from core.generic_ai_review import GenericAIReviewOutcome
+        from projects.expert_review.ai_review import run_ai_review
+
+        project_dir = os.path.join(os.path.dirname(__file__), "..", "projects", "expert_review")
+        trace_fd, trace_path = tempfile.mkstemp(suffix=".jsonl")
+        os.close(trace_fd)
+        result_fd, result_path = tempfile.mkstemp(suffix=".json")
+        os.close(result_fd)
+        error_fd, error_path = tempfile.mkstemp(suffix=".json")
+        os.close(error_fd)
+        os.unlink(result_path)
+        os.unlink(error_path)
+        self.addCleanup(lambda: os.path.exists(trace_path) and os.unlink(trace_path))
+        self.addCleanup(lambda: os.path.exists(result_path) and os.unlink(result_path))
+        self.addCleanup(lambda: os.path.exists(error_path) and os.unlink(error_path))
+
+        with open(trace_path, "w", encoding="utf-8") as f:
+            f.write("{}\n")
+
+        mock_client = MagicMock()
+        mock_client.get_record.return_value = {
+            "fields": {
+                "任务说明": "请评审这个 trace",
+                "提交人": "张三",
+                "talent_id": "talent_123",
+                "岗位方向": "Coding",
+                "最终产物": {"link": "https://example.com/result"},
+            }
+        }
+
+        captured = {}
+        ai_result = self._valid_ai_result()
+
+        def fake_run_generic(request):
+            captured["request"] = request
+            with open(request.output_path, "w", encoding="utf-8") as f:
+                json.dump(ai_result, f, ensure_ascii=False, indent=2)
+            return GenericAIReviewOutcome(
+                success=True,
+                result_json=ai_result,
+                mode_used="api",
+                elapsed_seconds=1.5,
+            )
+
+        env = {
+            "FEISHU_APP_ID": "test",
+            "FEISHU_APP_SECRET": "test",
+            "TRACE_OUTPUT_PATH": trace_path,
+            "AI_REVIEW_RESULT_PATH": result_path,
+            "AI_REVIEW_ERROR_PATH": error_path,
+        }
+        old_env = {}
+        for key, value in env.items():
+            old_env[key] = os.environ.get(key)
+            os.environ[key] = value
+
+        try:
+            with patch("projects.expert_review.ai_review.FeishuClient.from_config", return_value=mock_client), \
+                 patch("projects.expert_review.ai_review.extract_user_focused_content", return_value="trace summary"), \
+                 patch("projects.expert_review.ai_review.run_generic_ai_review", side_effect=fake_run_generic):
+                exit_code = run_ai_review("rec_test_123", project_dir)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("request", captured)
+        request = captured["request"]
+        self.assertIn("trace summary", request.input_text)
+        self.assertIn("张三", request.input_text)
+        self.assertIn("https://example.com/result", request.input_text)
+        self.assertEqual(request.output_path, result_path)
+
+
 if __name__ == "__main__":
     unittest.main()

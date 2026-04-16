@@ -16,6 +16,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -232,6 +233,75 @@ class TestExtensibility(unittest.TestCase):
         self.assertEqual(config_b.cpu, 1)
         self.assertEqual(config_a.timeout, 1200)
         self.assertNotEqual(config_a.model, config_b.model)
+
+    def test_new_project_can_use_generic_ai_review_node(self):
+        """新项目只提供自己的 prompt/schema/input 也能复用通用评审节点。"""
+        from core.generic_ai_review import (
+            GenericAIReviewOutcome,
+            GenericAIReviewRequest,
+            run_generic_ai_review,
+        )
+
+        tmpdir = tempfile.mkdtemp()
+        prompt_path = os.path.join(tmpdir, "prompt.md")
+        schema_path = os.path.join(tmpdir, "schema.json")
+        input_path = os.path.join(tmpdir, "input.txt")
+        output_path = os.path.join(tmpdir, "result.json")
+        error_path = os.path.join(tmpdir, "error.json")
+
+        with open(prompt_path, "w", encoding="utf-8") as f:
+            f.write("你是评审员。")
+        with open(schema_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "name": "custom_review",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "score": {"type": "integer"},
+                            "summary": {"type": "string"},
+                        },
+                        "required": ["score", "summary"],
+                        "additionalProperties": False,
+                    },
+                },
+                f,
+                ensure_ascii=False,
+            )
+        with open(input_path, "w", encoding="utf-8") as f:
+            f.write("待评审内容")
+
+        with open(prompt_path, encoding="utf-8") as f:
+            prompt_text = f.read()
+        with open(schema_path, encoding="utf-8") as f:
+            schema_text = f.read()
+        with open(input_path, encoding="utf-8") as f:
+            input_text = f.read()
+
+        request = GenericAIReviewRequest(
+            prompt_text=prompt_text,
+            schema_text=schema_text,
+            input_text=input_text,
+            output_path=output_path,
+            error_output_path=error_path,
+            mode="api",
+        )
+
+        with patch(
+            "core.generic_ai_review._execute_ai_review",
+            return_value=GenericAIReviewOutcome(
+                success=True,
+                result_json={"custom_review": {"score": 9, "summary": "可复用"}},
+                mode_used="api",
+            ),
+        ):
+            outcome = run_generic_ai_review(request)
+
+        self.assertTrue(outcome.success)
+        with open(output_path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["score"], 9)
+        self.assertEqual(data["summary"], "可复用")
 
 
 if __name__ == "__main__":
