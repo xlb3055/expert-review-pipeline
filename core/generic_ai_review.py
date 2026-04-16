@@ -258,32 +258,63 @@ def normalize_schema_payload(schema_text: str) -> dict[str, Any]:
 
 
 def unwrap_schema_envelope(result_obj: Any, schema_payload: Mapping[str, Any]) -> dict[str, Any]:
-    """解开可能被 schema name 包裹的一层结果。"""
+    """解开可能被 schema name 或 CLI 执行器包裹的多层结果。
+
+    处理的包装格式:
+    1. {"expert_review_result": {实际结果}}  — schema name 包装
+    2. {"type":"result","result":"{...}"}    — Claude CLI --output-format json
+    3. {"structured_output": {实际结果}}     — 某些执行器格式
+    4. {"result": {实际结果}}               — 通用 result 包装
+    """
     if not isinstance(result_obj, dict):
         raise GenericAIReviewSchemaError("模型输出必须是 JSON object")
 
+    root_props = schema_payload.get("schema", {}).get("properties", {})
+    root_prop_keys = set(root_props.keys()) if isinstance(root_props, dict) else set()
     schema_name = schema_payload.get("name", "")
-    inner = result_obj.get(schema_name)
-    if not (schema_name and isinstance(inner, dict)):
-        result_obj = dict(result_obj)
-    else:
-        root_props = schema_payload.get("schema", {}).get("properties", {})
-        root_prop_keys = set(root_props.keys()) if isinstance(root_props, dict) else set()
-        if len(result_obj) == 1:
-            result_obj = inner
-        elif root_prop_keys and root_prop_keys.isdisjoint(set(result_obj.keys()) - {schema_name}):
-            result_obj = inner
-        else:
-            result_obj = dict(result_obj)
 
-    # 清理 schema 中未声明的多余字段（如 Claude CLI 包装层残留的 error/type 等）
+    # 递归解包，最多尝试 5 层防止无限循环
+    for _ in range(5):
+        # 已经是目标结构，直接返回
+        if root_prop_keys and root_prop_keys.issubset(set(result_obj.keys())):
+            break
+
+        unwrapped = False
+
+        # 尝试 schema name 包装: {"expert_review_result": {...}}
+        if schema_name:
+            inner = result_obj.get(schema_name)
+            if isinstance(inner, dict):
+                result_obj = inner
+                unwrapped = True
+                continue
+
+        # 尝试 CLI/执行器包装: {"result": "..."} 或 {"result": {...}}
+        for wrapper_key in ("structured_output", "result"):
+            val = result_obj.get(wrapper_key)
+            if isinstance(val, dict) and val:
+                result_obj = val
+                unwrapped = True
+                break
+            if isinstance(val, str) and val.strip():
+                try:
+                    parsed = json.loads(val.strip())
+                    if isinstance(parsed, dict):
+                        result_obj = parsed
+                        unwrapped = True
+                        break
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        if not unwrapped:
+            break
+
+    # 清理 schema 中未声明的多余字段（如 CLI 包装层残留的 error/type 等）
     root_schema = schema_payload.get("schema", {})
-    if root_schema.get("additionalProperties") is False:
-        declared_keys = set(root_schema.get("properties", {}).keys())
-        if declared_keys:
-            extra_keys = set(result_obj.keys()) - declared_keys
-            for key in extra_keys:
-                del result_obj[key]
+    if root_schema.get("additionalProperties") is False and root_prop_keys:
+        extra_keys = set(result_obj.keys()) - root_prop_keys
+        for key in extra_keys:
+            del result_obj[key]
 
     return result_obj
 
