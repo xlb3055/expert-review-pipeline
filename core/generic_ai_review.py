@@ -258,13 +258,14 @@ def normalize_schema_payload(schema_text: str) -> dict[str, Any]:
 
 
 def unwrap_schema_envelope(result_obj: Any, schema_payload: Mapping[str, Any]) -> dict[str, Any]:
-    """解开可能被 schema name 或 CLI 执行器包裹的多层结果。
+    """解开可能被任意层包裹的模型输出，找到匹配 schema 的实际结果。
 
-    处理的包装格式:
-    1. {"expert_review_result": {实际结果}}  — schema name 包装
-    2. {"type":"result","result":"{...}"}    — Claude CLI --output-format json
-    3. {"structured_output": {实际结果}}     — 某些执行器格式
-    4. {"result": {实际结果}}               — 通用 result 包装
+    使用 BFS（广度优先搜索）遍历所有嵌套层级，自动处理：
+    - schema name 包装: {"expert_review_result": {...}}
+    - CLI 包装: {"type":"result","result":"{...}"}
+    - 执行器包装: {"structured_output": {...}}
+    - 字符串内嵌 JSON: {"result": "{\\"key\\":\\"val\\"}"}
+    - 以及任意组合和嵌套
     """
     if not isinstance(result_obj, dict):
         raise GenericAIReviewSchemaError("模型输出必须是 JSON object")
@@ -273,46 +274,97 @@ def unwrap_schema_envelope(result_obj: Any, schema_payload: Mapping[str, Any]) -
     root_prop_keys = set(root_props.keys()) if isinstance(root_props, dict) else set()
     schema_name = schema_payload.get("name", "")
 
-    # 递归解包，最多尝试 5 层防止无限循环
-    for _ in range(5):
-        # 已经是目标结构，直接返回
-        if root_prop_keys and root_prop_keys.issubset(set(result_obj.keys())):
-            break
+    # 快速路径：已经是目标结构
+    if root_prop_keys and root_prop_keys.issubset(set(result_obj.keys())):
+        _strip_extra_fields(result_obj, schema_payload.get("schema", {}))
+        return result_obj
 
-        unwrapped = False
+    # BFS 遍历所有候选节点
+    _WRAPPER_KEYS = [schema_name] if schema_name else []
+    _WRAPPER_KEYS.extend(["structured_output", "result"])
 
-        # 尝试 schema name 包装: {"expert_review_result": {...}}
-        if schema_name:
-            inner = result_obj.get(schema_name)
-            if isinstance(inner, dict):
-                result_obj = inner
-                unwrapped = True
+    queue: list[Any] = [result_obj]
+    seen_texts: set[str] = set()
+    visited = 0
+
+    while queue and visited < 200:
+        current = queue.pop(0)
+        visited += 1
+
+        # 字符串：尝试解析为 JSON 后入队
+        if isinstance(current, str):
+            text = current.strip()
+            if not text or text in seen_texts:
                 continue
+            seen_texts.add(text)
+            parsed = _try_parse_json_text(text)
+            if parsed is not None:
+                queue.append(parsed)
+            continue
 
-        # 尝试 CLI/执行器包装: {"result": "..."} 或 {"result": {...}}
-        for wrapper_key in ("structured_output", "result"):
-            val = result_obj.get(wrapper_key)
-            if isinstance(val, dict) and val:
-                result_obj = val
-                unwrapped = True
-                break
-            if isinstance(val, str) and val.strip():
-                try:
-                    parsed = json.loads(val.strip())
-                    if isinstance(parsed, dict):
-                        result_obj = parsed
-                        unwrapped = True
-                        break
-                except (json.JSONDecodeError, TypeError):
-                    pass
+        if isinstance(current, list):
+            queue.extend(current)
+            continue
 
-        if not unwrapped:
-            break
+        if not isinstance(current, dict):
+            continue
 
-    # 递归清理 schema 中未声明的多余字段
+        # 检查是否匹配 schema 根属性
+        if root_prop_keys and root_prop_keys.issubset(set(current.keys())):
+            _strip_extra_fields(current, schema_payload.get("schema", {}))
+            return current
+
+        # 优先遍历已知包装键
+        for key in _WRAPPER_KEYS:
+            if not key:
+                continue
+            val = current.get(key)
+            if isinstance(val, (dict, list, str)):
+                queue.append(val)
+
+        # 再遍历其它字段
+        for key, val in current.items():
+            if key in _WRAPPER_KEYS:
+                continue
+            if isinstance(val, (dict, list, str)):
+                queue.append(val)
+
+    # BFS 未找到完全匹配的节点，回退到原始对象并尽力清理
     _strip_extra_fields(result_obj, schema_payload.get("schema", {}))
-
     return result_obj
+
+
+def _try_parse_json_text(text: str) -> Any:
+    """尝试从文本中解析出 JSON 对象。"""
+    text = text.strip()
+    if not text:
+        return None
+
+    # 1. 直接解析
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. markdown 代码块
+    import re
+    fenced = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # 3. 首尾大括号截取
+    fb = text.find("{")
+    lb = text.rfind("}")
+    if fb != -1 and lb > fb:
+        try:
+            return json.loads(text[fb:lb + 1])
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def _strip_extra_fields(obj: Any, schema: Mapping[str, Any]) -> None:

@@ -107,6 +107,62 @@ class TestGenericAIReviewSchemaHelpers(unittest.TestCase):
         result = unwrap_schema_envelope({"demo_result": {"score": 8}}, schema)
         self.assertEqual(result, {"score": 8})
 
+    def test_unwrap_cli_type_result_string(self):
+        """Claude CLI --output-format json 包装: {"type":"result","result":"{\\"score\\":8}"}"""
+        schema = normalize_schema_payload(json.dumps({
+            "name": "demo_result",
+            "schema": {
+                "type": "object",
+                "properties": {"score": {"type": "integer"}},
+                "required": ["score"],
+            }
+        }))
+        cli_output = {"type": "result", "result": json.dumps({"score": 8})}
+        result = unwrap_schema_envelope(cli_output, schema)
+        self.assertEqual(result["score"], 8)
+
+    def test_unwrap_cli_double_wrapped(self):
+        """CLI 包装 + schema name 包装: {"type":"result","result":"{\\"demo_result\\":{\\"score\\":8}}"}"""
+        schema = normalize_schema_payload(json.dumps({
+            "name": "demo_result",
+            "schema": {
+                "type": "object",
+                "properties": {"score": {"type": "integer"}},
+                "required": ["score"],
+            }
+        }))
+        inner = json.dumps({"demo_result": {"score": 8}})
+        cli_output = {"type": "result", "result": inner}
+        result = unwrap_schema_envelope(cli_output, schema)
+        self.assertEqual(result["score"], 8)
+
+    def test_unwrap_structured_output(self):
+        """执行器格式: {"structured_output": {"score": 8}}"""
+        schema = normalize_schema_payload(json.dumps({
+            "name": "demo_result",
+            "schema": {
+                "type": "object",
+                "properties": {"score": {"type": "integer"}},
+                "required": ["score"],
+            }
+        }))
+        result = unwrap_schema_envelope({"structured_output": {"score": 8}}, schema)
+        self.assertEqual(result["score"], 8)
+
+    def test_unwrap_deeply_nested(self):
+        """三层嵌套: result -> demo_result -> 实际数据"""
+        schema = normalize_schema_payload(json.dumps({
+            "name": "demo_result",
+            "schema": {
+                "type": "object",
+                "properties": {"score": {"type": "integer"}},
+                "required": ["score"],
+            }
+        }))
+        wrapped = {"result": {"demo_result": {"score": 8}}}
+        result = unwrap_schema_envelope(wrapped, schema)
+        self.assertEqual(result["score"], 8)
+
     def test_unwrap_strips_extra_fields_when_additional_properties_false(self):
         """additionalProperties=false 时，unwrap 应清理 schema 未声明的多余字段"""
         schema = normalize_schema_payload(json.dumps({
@@ -135,6 +191,41 @@ class TestGenericAIReviewSchemaHelpers(unittest.TestCase):
         }))
         result = unwrap_schema_envelope({"score": 8, "extra": "kept"}, schema)
         self.assertIn("extra", result)
+
+    def test_unwrap_expert_review_real_format(self):
+        """模拟真实 expert_review schema 的多层包装场景"""
+        schema = normalize_schema_payload(json.dumps({
+            "name": "expert_review_result",
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "expert_ability": {"type": "object", "properties": {"total": {"type": "integer"}}, "required": ["total"]},
+                    "trace_asset": {"type": "object", "properties": {"total": {"type": "integer"}}, "required": ["total"]},
+                    "overall_assessment": {"type": "string"},
+                    "trace_highlights": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["expert_ability", "trace_asset", "overall_assessment", "trace_highlights"],
+            }
+        }))
+        actual_data = {
+            "expert_ability": {"total": 7},
+            "trace_asset": {"total": 9},
+            "overall_assessment": "good",
+            "trace_highlights": ["a"],
+        }
+        # 场景1: schema name 包装
+        result = unwrap_schema_envelope({"expert_review_result": actual_data.copy()}, schema)
+        self.assertEqual(result["expert_ability"]["total"], 7)
+
+        # 场景2: CLI string 包装 + schema name 包装
+        cli_output = {"type": "result", "result": json.dumps({"expert_review_result": actual_data})}
+        result = unwrap_schema_envelope(cli_output, schema)
+        self.assertEqual(result["expert_ability"]["total"], 7)
+
+        # 场景3: 直接是实际数据
+        result = unwrap_schema_envelope(actual_data.copy(), schema)
+        self.assertEqual(result["expert_ability"]["total"], 7)
 
 
 class TestAutoFillTotals(unittest.TestCase):
