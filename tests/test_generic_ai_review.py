@@ -13,6 +13,7 @@ from core.generic_ai_review import (
     GenericAIReviewExecutionError,
     GenericAIReviewOutcome,
     GenericAIReviewRequest,
+    _auto_fill_totals,
     normalize_schema_payload,
     resolve_request_from_sources,
     run_generic_ai_review,
@@ -134,6 +135,101 @@ class TestGenericAIReviewSchemaHelpers(unittest.TestCase):
         }))
         result = unwrap_schema_envelope({"score": 8, "extra": "kept"}, schema)
         self.assertIn("extra", result)
+
+
+class TestAutoFillTotals(unittest.TestCase):
+    def test_fills_missing_total(self):
+        """模型没返回 total 时，自动根据各维度 score 求和补上"""
+        schema = normalize_schema_payload(json.dumps({
+            "name": "review",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "expert_ability": {
+                        "type": "object",
+                        "properties": {
+                            "dim_a": {"type": "object", "properties": {"score": {"type": "integer"}}, "required": ["score"]},
+                            "dim_b": {"type": "object", "properties": {"score": {"type": "integer"}}, "required": ["score"]},
+                            "total": {"type": "integer"},
+                        },
+                        "required": ["dim_a", "dim_b", "total"],
+                    }
+                },
+                "required": ["expert_ability"],
+            }
+        }))
+        result = {"expert_ability": {"dim_a": {"score": 3}, "dim_b": {"score": 5}}}
+        _auto_fill_totals(result, schema)
+        self.assertEqual(result["expert_ability"]["total"], 8)
+
+    def test_does_not_overwrite_existing_total(self):
+        """模型已返回 total 时，不应覆盖"""
+        schema = normalize_schema_payload(json.dumps({
+            "name": "review",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "module": {
+                        "type": "object",
+                        "properties": {
+                            "dim": {"type": "object", "properties": {"score": {"type": "integer"}}, "required": ["score"]},
+                            "total": {"type": "integer"},
+                        },
+                        "required": ["dim", "total"],
+                    }
+                },
+                "required": ["module"],
+            }
+        }))
+        result = {"module": {"dim": {"score": 3}, "total": 99}}
+        _auto_fill_totals(result, schema)
+        self.assertEqual(result["module"]["total"], 99)
+
+    def test_run_success_auto_fills_total(self):
+        """端到端：模型输出缺 total 时，run_generic_ai_review 自动补上后通过校验"""
+        schema_text = json.dumps({
+            "name": "demo_result",
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "module": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "dim_a": {"type": "object", "additionalProperties": False, "properties": {"score": {"type": "integer"}}, "required": ["score"]},
+                            "dim_b": {"type": "object", "additionalProperties": False, "properties": {"score": {"type": "integer"}}, "required": ["score"]},
+                            "total": {"type": "integer"},
+                        },
+                        "required": ["dim_a", "dim_b", "total"],
+                    }
+                },
+                "required": ["module"],
+            }
+        })
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(lambda: os.path.isdir(tmpdir) and __import__("shutil").rmtree(tmpdir))
+        request = GenericAIReviewRequest(
+            prompt_text="prompt", schema_text=schema_text, input_text="input",
+            output_path=os.path.join(tmpdir, "result.json"),
+            error_output_path=os.path.join(tmpdir, "error.json"),
+            mode="api",
+        )
+        # 模型输出没有 total
+        with patch(
+            "core.generic_ai_review._execute_ai_review",
+            return_value=GenericAIReviewOutcome(
+                success=True,
+                result_json={"demo_result": {"module": {"dim_a": {"score": 2}, "dim_b": {"score": 3}}}},
+                mode_used="api",
+            ),
+        ):
+            outcome = run_generic_ai_review(request)
+
+        self.assertTrue(outcome.success, f"应成功但失败: {outcome.error}")
+        with open(request.output_path, encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["module"]["total"], 5)
 
 
 class TestGenericAIReviewExecution(unittest.TestCase):

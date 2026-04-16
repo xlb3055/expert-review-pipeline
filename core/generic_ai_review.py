@@ -288,6 +288,45 @@ def unwrap_schema_envelope(result_obj: Any, schema_payload: Mapping[str, Any]) -
     return result_obj
 
 
+def _auto_fill_totals(result_obj: dict[str, Any], schema_payload: Mapping[str, Any]) -> None:
+    """自动补算缺失的 total 字段。
+
+    当模块（如 expert_ability / trace_asset）的 schema 声明了 total 为 required，
+    但模型输出中缺少 total 时，根据各维度 score 自动求和补上。
+    """
+    root_schema = schema_payload.get("schema", {})
+    root_props = root_schema.get("properties", {})
+    if not isinstance(root_props, Mapping):
+        return
+
+    for prop_key, prop_schema in root_props.items():
+        if not isinstance(prop_schema, Mapping) or prop_schema.get("type") != "object":
+            continue
+        module_data = result_obj.get(prop_key)
+        if not isinstance(module_data, dict):
+            continue
+        # 仅在 total 是 required 但缺失时补算
+        module_required = prop_schema.get("required", [])
+        module_properties = prop_schema.get("properties", {})
+        if "total" not in module_required or "total" in module_data:
+            continue
+        if "total" not in module_properties:
+            continue
+        # 求和所有维度的 score
+        total = 0
+        for dim_key, dim_schema in module_properties.items():
+            if dim_key == "total":
+                continue
+            if not isinstance(dim_schema, Mapping) or dim_schema.get("type") != "object":
+                continue
+            dim_data = module_data.get(dim_key)
+            if isinstance(dim_data, dict):
+                score = dim_data.get("score")
+                if isinstance(score, (int, float)):
+                    total += int(score)
+        module_data["total"] = total
+
+
 def validate_result_against_schema(
     result_obj: dict[str, Any],
     schema_payload: Mapping[str, Any],
@@ -312,6 +351,7 @@ def run_generic_ai_review(request: GenericAIReviewRequest) -> GenericAIReviewOut
         schema_payload = normalize_schema_payload(request.schema_text)
         outcome = _execute_ai_review(request, schema_payload)
         result_obj = unwrap_schema_envelope(outcome.result_json, schema_payload)
+        _auto_fill_totals(result_obj, schema_payload)
         validate_result_against_schema(result_obj, schema_payload)
         _write_json_file(request.output_path, result_obj)
         _delete_file_if_exists(request.error_output_path)
