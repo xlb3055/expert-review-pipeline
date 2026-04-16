@@ -18,6 +18,7 @@ import sys
 
 from core.config_loader import load_project_config
 from core.feishu_utils import FeishuClient
+from core.review_result_validator import validate_ai_review_result
 
 
 def read_json_file(path: str) -> dict:
@@ -103,6 +104,20 @@ TRACE_DIM_LABELS = {
     "verification_loop": ("验证闭环", 2),
     "compliance": ("合规可用性", 2),
 }
+
+
+def _build_invalid_ai_result_note(reason: str, ai_review_path: str) -> str:
+    """AI 结果缺失/异常时写入主表的机审说明。"""
+    return "\n".join([
+        "AI评审结果不可用，本次未执行自动打分。",
+        f"原因: {reason}",
+        f"结果文件: {ai_review_path}",
+    ])
+
+
+def _build_invalid_ai_result_remark() -> str:
+    """AI 结果缺失/异常时写入主表的机审备注。"""
+    return "本次自动评审结果未成功生成，暂不输出自动评分结论，请人工复核。"
 
 
 def _build_machine_note(expert_scores: dict, trace_scores: dict,
@@ -241,12 +256,38 @@ def run_writeback(record_id: str, project_dir: str) -> int:
 
     # 2. 读取 AI 评审结果
     print("\n--- 读取 AI 评审结果 ---")
+    ai_result = {}
+    ai_result_error = ""
     try:
         ai_result = read_json_file(ai_review_path)
         print(f"AI 评审结果键: {list(ai_result.keys())}")
     except Exception as e:
         print(f"读取 AI 评审结果失败: {e}", file=sys.stderr)
-        ai_result = {}
+        ai_result_error = str(e)
+
+    ai_result_ok, ai_result_reason = validate_ai_review_result(ai_result, expert_dims, trace_dims)
+    if not ai_result_ok:
+        reason = ai_result_reason or ai_result_error or "未知错误"
+        print(f"AI 评审结果不可用: {reason}", file=sys.stderr)
+
+        machine_note = _build_invalid_ai_result_note(reason, ai_review_path)
+        machine_remark = _build_invalid_ai_result_remark()
+
+        print("\n--- 主表回填 ---")
+        machine_note_field = mfm.get("machine_review_note", "机审说明")
+        machine_remark_field = mfm.get("machine_review_remark", "机审备注")
+
+        try:
+            client.update_record(app_token, table_id, record_id, {
+                machine_note_field: machine_note,
+                machine_remark_field: machine_remark,
+            })
+            print("主表回填成功:")
+            print(f"  {machine_note_field}: ({len(machine_note)} 字符)")
+            print(f"  {machine_remark_field}: ({len(machine_remark)} 字符)")
+        except Exception as e:
+            print(f"主表回填失败: {e}", file=sys.stderr)
+        return 1
 
     # 3. 提取双模块分数
     expert_scores = extract_scores(ai_result, "expert_ability", expert_dims)

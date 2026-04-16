@@ -32,6 +32,7 @@ from core.feishu_utils import (
     extract_attachment_file_token,
     extract_attachment_url,
 )
+from core.review_result_validator import validate_ai_review_result
 from core.trace_extractor import extract_user_focused_content
 
 # Daytona 为可选依赖，没装则只走直连 API 模式
@@ -182,7 +183,10 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     app_token = feishu["app_token"]
     table_id = feishu["table_id"]
     ai_cfg = config.get("ai_review", {})
+    scoring = config.get("scoring", {})
     workspace = config.get("workspace", {})
+    expert_dims = scoring.get("expert_ability", {}).get("dimensions", [])
+    trace_dims = scoring.get("trace_asset", {}).get("dimensions", [])
 
     trace_input_path = os.environ.get(
         "TRACE_OUTPUT_PATH",
@@ -312,6 +316,12 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     # 7. 解包 schema 包装
     if "expert_review_result" in result_obj and "expert_ability" not in result_obj:
         result_obj = result_obj["expert_review_result"]
+
+    ok, reason = validate_ai_review_result(result_obj, expert_dims, trace_dims)
+    if not ok:
+        print(f"错误: AI 评审输出结构异常: {reason}", file=sys.stderr)
+        _save_error_result(f"输出结构异常: {reason}", result_path)
+        return 1
 
     # 8. 保存结果
     result_dir = os.path.dirname(result_path)
