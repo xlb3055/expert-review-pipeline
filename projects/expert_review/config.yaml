@@ -43,7 +43,7 @@ ai_review:
 
 scoring:
   # 综合分 = 能力分百分比 * 50% + 资产分百分比 * 50%，>= pass_score 为通过
-  pass_score: 70
+  pass_score: 80
   expert_ability:
     max_total: 10
     dimensions:

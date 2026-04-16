@@ -72,7 +72,7 @@ def compute_composite_score(expert_total: int, trace_total: int,
 
 def determine_conclusion(expert_total: int, trace_total: int,
                          pre_screen_status: str,
-                         pass_score: float = 70,
+                         pass_score: float = 80,
                          expert_max: int = 10, trace_max: int = 12) -> tuple:
     """
     根据综合分判定通过/不通过。
@@ -156,13 +156,13 @@ def _build_machine_note(expert_scores: dict, trace_scores: dict,
 
 def _build_machine_remark(conclusion: str, composite_score: float,
                           expert_scores: dict, trace_scores: dict,
-                          ai_result: dict, pass_score: float = 70) -> str:
+                          ai_result: dict, pass_score: float = 80) -> str:
     """机审备注：结论 + 简短人话反馈，发给专家看的。"""
     expert_data = ai_result.get("expert_ability", {})
     trace_data = ai_result.get("trace_asset", {})
     overall = ai_result.get("overall_assessment", "")
 
-    lines = [f"结论: {conclusion}（综合评分 {composite_score:.0f}）"]
+    lines = [f"结论: {conclusion}"]
 
     if conclusion == "通过":
         if overall:
@@ -174,17 +174,22 @@ def _build_machine_remark(conclusion: str, composite_score: float,
             lines.append(overall)
         else:
             lines.append(f"综合评分未达及格线（{pass_score:.0f}），请参考以下方向改进。")
-        # 只列出明显不足的维度名称和简短方向，不贴详细 suggestion
-        weak = []
+        # 列出不足维度及其具体改进建议
+        weak_details = []
         all_dims = list(EXPERT_DIM_LABELS.items()) + list(TRACE_DIM_LABELS.items())
         for key, (label, max_s) in all_dims:
             data = expert_data if key in EXPERT_DIM_LABELS else trace_data
             dim = data.get(key, {})
             s = dim.get("score", 0) if isinstance(dim, dict) else 0
-            if s / max_s < 0.5 if max_s else False:
-                weak.append(label)
-        if weak:
-            lines.append(f"建议重点提升: {'、'.join(weak)}")
+            suggestion = dim.get("suggestion", "") if isinstance(dim, dict) else ""
+            if max_s and s / max_s < 0.5:
+                if suggestion and suggestion not in ("无，当前表现优秀", "无"):
+                    weak_details.append(f"- {label}（{s}/{max_s}）: {suggestion}")
+                else:
+                    weak_details.append(f"- {label}（{s}/{max_s}）")
+        if weak_details:
+            lines.append("主要不足:")
+            lines.extend(weak_details)
 
     return "\n".join(lines)
 

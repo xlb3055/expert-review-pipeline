@@ -72,7 +72,7 @@ def process_one(record_id, feishu_client, app_token, table_id,
                 prompt_content, json_schema, schema_content,
                 model, api_key, config, expert_dims, trace_dims,
                 machine_note_field, machine_remark_field, workspace_dir,
-                pass_score=70, expert_max=10, trace_max=12):
+                pass_score=80, expert_max=10, trace_max=12):
     """处理单条记录：调 API → 保存 → 回填。带重试。"""
     t0 = time.time()
     record_workspace = os.path.join(workspace_dir, record_id)
