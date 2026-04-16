@@ -162,7 +162,7 @@ def _build_machine_remark(conclusion: str, composite_score: float,
     trace_data = ai_result.get("trace_asset", {})
     overall = ai_result.get("overall_assessment", "")
 
-    lines = [f"结论: {conclusion}"]
+    lines = [f"结论: {conclusion}（综合评分 {composite_score:.0f}）"]
 
     if conclusion == "通过":
         if overall:
