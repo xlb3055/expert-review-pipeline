@@ -18,6 +18,7 @@ import sys
 
 from core.config_loader import load_project_config
 from core.feishu_utils import FeishuClient
+from projects.expert_review.result_utils import normalize_ai_result
 
 
 def read_json_file(path: str) -> dict:
@@ -242,8 +243,10 @@ def run_writeback(record_id: str, project_dir: str) -> int:
     # 2. 读取 AI 评审结果
     print("\n--- 读取 AI 评审结果 ---")
     try:
-        ai_result = read_json_file(ai_review_path)
-        print(f"AI 评审结果键: {list(ai_result.keys())}")
+        raw_ai_result = read_json_file(ai_review_path)
+        print(f"AI 评审结果键: {list(raw_ai_result.keys())}")
+        ai_result = normalize_ai_result(raw_ai_result)
+        print(f"解包后结果键: {list(ai_result.keys())}")
     except Exception as e:
         print(f"读取 AI 评审结果失败: {e}", file=sys.stderr)
         ai_result = {}

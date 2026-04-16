@@ -450,42 +450,89 @@ class TestWritebackLogic(unittest.TestCase):
         scores = extract_scores({}, "expert_ability", self._expert_dims())
         self.assertEqual(scores["total"], 0)
 
+    def test_normalize_ai_result_from_claude_cli_wrapper(self):
+        from projects.expert_review.result_utils import normalize_ai_result
+
+        wrapped = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": json.dumps({
+                "expert_review_result": {
+                    "expert_ability": {
+                        "task_complexity": {"score": 2, "evidence": "..."},
+                        "iteration_quality": {"score": 3, "evidence": "..."},
+                        "professional_judgment": {"score": 4, "evidence": "..."},
+                        "total": 9,
+                    },
+                    "trace_asset": {
+                        "authenticity": {"score": 2, "evidence": "..."},
+                        "info_density": {"score": 2, "evidence": "..."},
+                        "tool_loop": {"score": 2, "evidence": "..."},
+                        "correction_value": {"score": 1, "evidence": "..."},
+                        "verification_loop": {"score": 2, "evidence": "..."},
+                        "compliance": {"score": 2, "evidence": "..."},
+                        "total": 11,
+                    },
+                    "overall_assessment": "整体表现较好",
+                }
+            }, ensure_ascii=False),
+            "session_id": "sess_123",
+            "uuid": "uuid_123",
+        }
+
+        normalized = normalize_ai_result(wrapped)
+        self.assertIn("expert_ability", normalized)
+        self.assertIn("trace_asset", normalized)
+        self.assertEqual(normalized["expert_ability"]["task_complexity"]["score"], 2)
+        self.assertEqual(normalized["trace_asset"]["verification_loop"]["score"], 2)
+
+    def test_extract_scores_after_normalize_wrapper(self):
+        from projects.expert_review.result_utils import normalize_ai_result
+        from projects.expert_review.writeback import extract_scores
+
+        wrapped = {
+            "type": "result",
+            "result": json.dumps({
+                "expert_review_result": {
+                    "expert_ability": {
+                        "task_complexity": {"score": 3},
+                        "iteration_quality": {"score": 2},
+                        "professional_judgment": {"score": 4},
+                    }
+                }
+            }, ensure_ascii=False)
+        }
+
+        scores = extract_scores(
+            normalize_ai_result(wrapped),
+            "expert_ability",
+            self._expert_dims(),
+        )
+        self.assertEqual(scores["task_complexity"], 3)
+        self.assertEqual(scores["iteration_quality"], 2)
+        self.assertEqual(scores["professional_judgment"], 4)
+        self.assertEqual(scores["total"], 9)
+
     # --- 新结论判定逻辑 ---
 
-    def test_conclusion_expert_storable(self):
-        """专家能力 >= 7 → 可储备专家"""
+    def test_conclusion_pass_when_composite_reaches_threshold(self):
+        """综合分达到 80 → 通过"""
         from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(8, 5, "通过"), "可储备专家")
-        self.assertEqual(determine_conclusion(7, 3, "通过"), "可储备专家")
+        self.assertEqual(determine_conclusion(8, 10, "通过"), ("通过", 81.7))
+        self.assertEqual(determine_conclusion(10, 10, "通过"), ("通过", 91.7))
 
-    def test_conclusion_high_value_trace(self):
-        """Trace 资产 >= 9 → 高价值trace"""
+    def test_conclusion_reject_when_composite_below_threshold(self):
+        """综合分低于 80 → 不通过"""
         from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(4, 10, "通过"), "高价值trace")
-        self.assertEqual(determine_conclusion(3, 9, "通过"), "高价值trace")
-
-    def test_conclusion_both(self):
-        """两者同时满足 → 可储备专家 + 高价值trace"""
-        from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(8, 10, "通过"), "可储备专家 + 高价值trace")
-
-    def test_conclusion_manual_review(self):
-        """专家能力 >= 5 或 Trace >= 6 → 待人工复核"""
-        from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(5, 3, "通过"), "待人工复核")
-        self.assertEqual(determine_conclusion(3, 6, "通过"), "待人工复核")
-        self.assertEqual(determine_conclusion(6, 8, "通过"), "待人工复核")
-
-    def test_conclusion_reject(self):
-        """都不满足 → 拒绝"""
-        from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(4, 5, "通过"), "拒绝")
-        self.assertEqual(determine_conclusion(0, 0, "通过"), "拒绝")
+        self.assertEqual(determine_conclusion(8, 5, "通过"), ("不通过", 60.8))
+        self.assertEqual(determine_conclusion(4, 10, "通过"), ("不通过", 61.7))
+        self.assertEqual(determine_conclusion(0, 0, "通过"), ("不通过", 0.0))
 
     def test_conclusion_pre_screen_reject(self):
-        """粗筛拒绝 → 最终拒绝，不论分数"""
+        """粗筛拒绝 → 直接不通过，综合分记 0"""
         from projects.expert_review.writeback import determine_conclusion
-        self.assertEqual(determine_conclusion(10, 12, "拒绝"), "拒绝")
+        self.assertEqual(determine_conclusion(10, 12, "拒绝"), ("不通过", 0.0))
 
 
 # ============================================================

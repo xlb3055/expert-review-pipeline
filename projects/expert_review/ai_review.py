@@ -33,6 +33,7 @@ from core.feishu_utils import (
     extract_attachment_url,
 )
 from core.trace_extractor import extract_user_focused_content
+from projects.expert_review.result_utils import normalize_ai_result
 
 # Daytona 为可选依赖，没装则只走直连 API 模式
 try:
@@ -126,13 +127,9 @@ def _call_claude_cli(prompt_content: str, schema_content: str,
         if not raw:
             raise RuntimeError("Claude CLI 返回空输出")
 
-        result = json.loads(raw)
-        # 处理 structured_output 包装
-        if isinstance(result.get("result"), str):
-            try:
-                result = json.loads(result["result"])
-            except (json.JSONDecodeError, TypeError):
-                pass
+        result = normalize_ai_result(raw)
+        if not result:
+            raise RuntimeError("Claude CLI 返回内容无法解析为评审结果")
         return result
 
 
@@ -309,9 +306,13 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
         _save_error_result("无可用评审通道", result_path)
         return 1
 
-    # 7. 解包 schema 包装
-    if "expert_review_result" in result_obj and "expert_ability" not in result_obj:
-        result_obj = result_obj["expert_review_result"]
+    # 7. 统一解包执行器/模型包装
+    raw_keys = list(result_obj.keys()) if isinstance(result_obj, dict) else []
+    result_obj = normalize_ai_result(result_obj)
+    if not isinstance(result_obj, dict) or not result_obj:
+        print("错误: AI 评审结果为空或无法解包", file=sys.stderr)
+        _save_error_result("AI 评审结果为空或无法解包", result_path)
+        return 1
 
     # 8. 保存结果
     result_dir = os.path.dirname(result_path)
@@ -320,6 +321,9 @@ def run_ai_review(record_id: str, project_dir: str) -> int:
     with open(result_path, "w", encoding="utf-8") as f:
         json.dump(result_obj, f, ensure_ascii=False, indent=2)
     print(f"\nAI 评审结果已保存: {result_path}")
+    if raw_keys:
+        print(f"原始结果键: {raw_keys}")
+    print(f"解包后结果键: {list(result_obj.keys())}")
     print(f"结果内容:\n{json.dumps(result_obj, ensure_ascii=False, indent=2)[:1000]}")
     print(f"总耗时: {elapsed:.1f}s")
 
