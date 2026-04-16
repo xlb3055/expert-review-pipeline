@@ -108,12 +108,14 @@ TRACE_DIM_LABELS = {
 
 
 def _build_machine_note(expert_scores: dict, trace_scores: dict,
-                        ai_result: dict) -> str:
-    """机审说明：纯逐项解析，不含结论。"""
+                        ai_result: dict, composite_score: float = 0.0) -> str:
+    """机审说明：综合评分 + 逐项解析。"""
     expert_data = ai_result.get("expert_ability", {})
     trace_data = ai_result.get("trace_asset", {})
 
     lines = [
+        f"综合评分: {composite_score:.0f}/100",
+        "",
         f"专家能力分: {expert_scores['total']}/10 "
         f"(复杂度{expert_scores.get('task_complexity', 0)}/3, "
         f"迭代{expert_scores.get('iteration_quality', 0)}/3, "
@@ -164,7 +166,7 @@ def _build_machine_remark(conclusion: str, composite_score: float,
     trace_data = ai_result.get("trace_asset", {})
     overall = ai_result.get("overall_assessment", "")
 
-    lines = [f"结论: {conclusion}（综合评分 {composite_score:.0f}）"]
+    lines = [f"结论: {conclusion}"]
 
     if conclusion == "通过":
         if overall:
@@ -324,7 +326,7 @@ def run_writeback(record_id: str, project_dir: str) -> int:
     print(f"\n综合分: {composite_score:.0f}/100 → {conclusion}")
 
     # 5. 组装机审说明（详细）+ 机审备注（人话）
-    machine_note = _build_machine_note(expert_scores, trace_scores, ai_result)
+    machine_note = _build_machine_note(expert_scores, trace_scores, ai_result, composite_score)
     machine_remark = _build_machine_remark(
         conclusion, composite_score, expert_scores, trace_scores,
         ai_result, pass_score=pass_score,
