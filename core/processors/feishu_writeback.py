@@ -12,6 +12,7 @@ import json
 import os
 import sys
 
+from core.feishu_nodes import build_update_fields
 from core.processors import BaseProcessor, ProcessorContext, register
 
 
@@ -51,15 +52,11 @@ class FeishuWritebackProcessor(BaseProcessor):
             print("警告: 未配置 data_sink.field_mapping 或 field_mapping，跳过回填", file=sys.stderr)
             return 0
 
-        # 遍历 field_mapping，从 ctx.data 中收集要更新的字段
-        update_fields = {}
-        for data_key, feishu_field_name in field_mapping.items():
-            if data_key in ctx.data:
-                value = ctx.data[data_key]
-                # 如果值是 status_mapping 中的 key，做转换
-                if status_mapping and isinstance(value, str) and value in status_mapping:
-                    value = status_mapping[value]
-                update_fields[feishu_field_name] = value
+        update_fields = build_update_fields(
+            ctx.data,
+            field_mapping,
+            status_mapping=status_mapping,
+        )
 
         if not update_fields:
             print("未找到需要回填的字段（ctx.data 中无匹配 data_sink 的键）")

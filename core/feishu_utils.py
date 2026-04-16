@@ -109,6 +109,82 @@ class FeishuClient:
             raise RuntimeError(f"创建飞书记录失败: {data}")
         return data
 
+    def search_records(self, app_token: str, table_id: str, body: dict | None = None) -> dict:
+        """
+        查询多条记录。
+
+        body 会原样传给 records/search 接口，调用方可传 filter / sort / page_size / page_token 等。
+        """
+        token = self.get_token()
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/search"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        payload = body or {}
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"查询飞书记录失败: {data}")
+        return data.get("data", {})
+
+    def search_all_records(
+        self,
+        app_token: str,
+        table_id: str,
+        body: dict | None = None,
+        *,
+        page_size: int = 100,
+        max_records: int = 0,
+    ) -> list[dict]:
+        """分页查询多条记录，直到取完或达到 max_records。"""
+        base_body = dict(body or {})
+        base_body.setdefault("page_size", page_size)
+
+        all_items = []
+        page_token = ""
+        while True:
+            req_body = dict(base_body)
+            if page_token:
+                req_body["page_token"] = page_token
+            data = self.search_records(app_token, table_id, req_body)
+            items = data.get("items", [])
+            all_items.extend(items)
+
+            if max_records and len(all_items) >= max_records:
+                return all_items[:max_records]
+
+            if not data.get("has_more"):
+                break
+            page_token = data.get("page_token", "")
+            if not page_token:
+                break
+
+        return all_items
+
+    def batch_update_records(self, app_token: str, table_id: str, records: list[dict]) -> dict:
+        """批量更新多条记录，单次最多 500 条。"""
+        token = self.get_token()
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}"
+            f"/tables/{table_id}/records/batch_update"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        payload = {"records": records}
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"批量更新飞书记录失败: {data}")
+        return data.get("data", {})
+
     # ========== 附件下载 ==========
 
     def download_attachment(self, file_token: str, output_path: str,

@@ -1,0 +1,95 @@
+step: feishu-read
+version: 1.0.1
+displayName: 飞书读取
+description: 通用飞书读取模板，支持单条读取和条件查询多条。
+category: Command
+image: meetchances-cn-beijing.cr.volces.com/ci/feishu-io-template:1.0.1
+inputs:
+  - name: mode
+    displayName: 读取模式
+    type: string
+    required: true
+  - name: record-id
+    displayName: 记录ID
+    type: string
+    required: false
+  - name: app-id
+    displayName: 飞书AppID
+    type: string
+    required: true
+  - name: app-secret
+    displayName: 飞书AppSecret
+    type: string
+    required: true
+  - name: app-token
+    displayName: 飞书多维表AppToken
+    type: string
+    required: true
+  - name: table-id
+    displayName: 飞书数据表ID
+    type: string
+    required: true
+  - name: fields-json
+    displayName: 字段映射JSON
+    type: string
+    required: true
+  - name: search-body-json
+    displayName: 查询条件JSON
+    type: string
+    required: false
+  - name: max-records
+    displayName: 最大记录数
+    type: string
+    required: false
+  - name: output-file
+    displayName: 输出文件路径
+    type: string
+    required: false
+script: |
+  #!/bin/sh
+  set -e
+
+  # 在任何赋值之前，打印环境变量确认注入情况
+  echo "[DEBUG-EARLY] env RECORD_ID before input=${RECORD_ID:-EMPTY}"
+  echo "[DEBUG-EARLY] all RECORD vars:" && env | grep -i record || true
+
+  # 先保存环境变量（流水线变量注入），防止被 input 赋值覆盖
+  _ENV_RECORD_ID="${RECORD_ID:-}"
+
+  MODE='$(inputs.mode)'
+  RECORD_ID='$(inputs.record-id)'
+  APP_ID='$(inputs.app-id)'
+  APP_SECRET='$(inputs.app-secret)'
+  APP_TOKEN='$(inputs.app-token)'
+  TABLE_ID='$(inputs.table-id)'
+  FIELDS_JSON='$(inputs.fields-json)'
+  SEARCH_BODY_JSON='$(inputs.search-body-json)'
+  MAX_RECORDS='$(inputs.max-records)'
+  OUTPUT_FILE='$(inputs.output-file)'
+
+  # 非必填字段：input 留空时 Tekton 不替换，值仍是 $(inputs.xxx) 字面量
+  _prefix='$('
+  for var in RECORD_ID SEARCH_BODY_JSON MAX_RECORDS OUTPUT_FILE; do
+    eval val="\$$var"
+    case "$val" in
+      "${_prefix}"*) eval "$var=''" ;;
+    esac
+  done
+
+  # input 为空时从环境变量兜底
+  [ -z "$RECORD_ID" ] && RECORD_ID="$_ENV_RECORD_ID"
+  [ -z "$MODE" ] && MODE="record"
+  [ -z "$OUTPUT_FILE" ] && OUTPUT_FILE="/workspace/input.json"
+  [ -z "$MAX_RECORDS" ] && MAX_RECORDS="0"
+
+  python3 /app/scripts/feishu_read_template.py \
+    --mode "$MODE" \
+    --record-id "$RECORD_ID" \
+    --app-id "$APP_ID" \
+    --app-secret "$APP_SECRET" \
+    --app-token "$APP_TOKEN" \
+    --table-id "$TABLE_ID" \
+    --fields-json "$FIELDS_JSON" \
+    --search-body-json "$SEARCH_BODY_JSON" \
+    --max-records "$MAX_RECORDS" \
+    --output-file "$OUTPUT_FILE"

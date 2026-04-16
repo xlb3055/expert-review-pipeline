@@ -9,11 +9,10 @@
 同时保存原始值 ctx.data["_raw_字段名"] 供附件等场景使用。
 """
 
-import json
 import os
 import sys
 
-from core.feishu_utils import normalize_field_value
+from core.feishu_nodes import fetch_record_to_data
 from core.processors import BaseProcessor, ProcessorContext, register
 
 
@@ -37,25 +36,25 @@ class FeishuFetchProcessor(BaseProcessor):
             print("警告: 未配置 data_source.fields 或 field_mapping，跳过拉取", file=sys.stderr)
             return 0
 
-        # 从飞书获取记录
-        record = client.get_record(ctx.app_token, ctx.table_id, ctx.record_id)
-        fields = record.get("fields", {})
-        print(f"获取到 {len(fields)} 个字段")
+        data = fetch_record_to_data(
+            client,
+            ctx.app_token,
+            ctx.table_id,
+            ctx.record_id,
+            fields_map,
+        )
+        ctx.data.update(data)
 
-        # 将每个逻辑字段存入 ctx.data
+        raw_fields = ctx.data.get("_raw_fields", {})
+        print(f"获取到 {len(raw_fields)} 个字段")
         for logical_name, feishu_field_name in fields_map.items():
-            raw_value = fields.get(feishu_field_name)
-            ctx.data[logical_name] = normalize_field_value(raw_value)
-            ctx.data[f"_raw_{logical_name}"] = raw_value
-            print(f"  {logical_name} ({feishu_field_name}): {str(ctx.data[logical_name])[:80]}")
-
-        # 保留完整的原始 fields 供后续 processor 使用
-        ctx.data["_raw_fields"] = fields
+            print(f"  {logical_name} ({feishu_field_name}): {str(ctx.data.get(logical_name, ''))[:80]}")
 
         # 写出 ctx_data.json 供后续 script 阶段使用
         if ctx.workspace_dir:
             ctx_data_path = os.path.join(ctx.workspace_dir, "ctx_data.json")
             with open(ctx_data_path, "w", encoding="utf-8") as f:
+                import json
                 json.dump(ctx.data, f, ensure_ascii=False, indent=2)
             print(f"ctx_data.json 已写出: {ctx_data_path}")
 

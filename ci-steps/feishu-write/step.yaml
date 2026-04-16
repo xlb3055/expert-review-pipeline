@@ -1,0 +1,96 @@
+step: feishu-write
+version: 1.0.1
+displayName: 飞书写入
+description: 通用飞书写入模板，支持单条写入和批量写入。
+category: Command
+image: meetchances-cn-beijing.cr.volces.com/ci/feishu-io-template:1.0.1
+inputs:
+  - name: mode
+    displayName: 写入模式
+    type: string
+    required: true
+  - name: record-id
+    displayName: 记录ID
+    type: string
+    required: false
+  - name: app-id
+    displayName: 飞书AppID
+    type: string
+    required: true
+  - name: app-secret
+    displayName: 飞书AppSecret
+    type: string
+    required: true
+  - name: app-token
+    displayName: 飞书多维表AppToken
+    type: string
+    required: true
+  - name: table-id
+    displayName: 飞书数据表ID
+    type: string
+    required: true
+  - name: field-mapping-json
+    displayName: 输出字段映射JSON
+    type: string
+    required: true
+  - name: status-mapping-json
+    displayName: 状态映射JSON
+    type: string
+    required: false
+  - name: data-file
+    displayName: 输入数据文件路径
+    type: string
+    required: true
+  - name: chunk-size
+    displayName: 批量写入分片大小
+    type: string
+    required: false
+  - name: output-file
+    displayName: 输出文件路径
+    type: string
+    required: false
+script: |
+  #!/bin/sh
+  set -e
+
+  _ENV_RECORD_ID="${RECORD_ID:-}"
+
+  MODE='$(inputs.mode)'
+  RECORD_ID='$(inputs.record-id)'
+  APP_ID='$(inputs.app-id)'
+  APP_SECRET='$(inputs.app-secret)'
+  APP_TOKEN='$(inputs.app-token)'
+  TABLE_ID='$(inputs.table-id)'
+  FIELD_MAPPING_JSON='$(inputs.field-mapping-json)'
+  STATUS_MAPPING_JSON='$(inputs.status-mapping-json)'
+  DATA_FILE='$(inputs.data-file)'
+  CHUNK_SIZE='$(inputs.chunk-size)'
+  OUTPUT_FILE='$(inputs.output-file)'
+
+  # 非必填字段留空时 Tekton 不替换，值仍是 $(inputs.xxx) 字面量
+  _prefix='$('
+  for var in RECORD_ID STATUS_MAPPING_JSON CHUNK_SIZE OUTPUT_FILE; do
+    eval val="\$$var"
+    case "$val" in
+      "${_prefix}"*) eval "$var=''" ;;
+    esac
+  done
+
+  [ -z "$RECORD_ID" ] && RECORD_ID="$_ENV_RECORD_ID"
+  [ -z "$MODE" ] && MODE="single"
+  [ -z "$DATA_FILE" ] && DATA_FILE="/workspace/result.json"
+  [ -z "$CHUNK_SIZE" ] && CHUNK_SIZE="500"
+  [ -z "$OUTPUT_FILE" ] && OUTPUT_FILE="/workspace/write_summary.json"
+
+  python3 /app/scripts/feishu_write_template.py \
+    --mode "$MODE" \
+    --record-id "$RECORD_ID" \
+    --app-id "$APP_ID" \
+    --app-secret "$APP_SECRET" \
+    --app-token "$APP_TOKEN" \
+    --table-id "$TABLE_ID" \
+    --field-mapping-json "$FIELD_MAPPING_JSON" \
+    --status-mapping-json "$STATUS_MAPPING_JSON" \
+    --data-file "$DATA_FILE" \
+    --chunk-size "$CHUNK_SIZE" \
+    --output-file "$OUTPUT_FILE"
