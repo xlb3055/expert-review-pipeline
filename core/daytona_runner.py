@@ -192,6 +192,44 @@ with open(out_file, "w", encoding="utf-8") as f:
 
 # ========== 本地 JSON 修复 ==========
 
+def _fix_unescaped_quotes(text: str) -> str:
+    """修复 JSON 字符串值中未转义的双引号。"""
+    out = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if ch == '\\' and i + 1 < n:
+                out.append(ch)
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                k = i + 1
+                while k < n and text[k] in ' \t\r\n':
+                    k += 1
+                if k >= n or text[k] in ':,}]':
+                    in_string = False
+                    out.append('"')
+                else:
+                    out.append('\\"')
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append('"')
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
 def _try_repair_json(raw: str) -> str:
     """从模型输出中提取并修复为合法 JSON。"""
     try:
@@ -226,7 +264,13 @@ def _try_repair_json(raw: str) -> str:
             json.loads(candidate)
             return candidate
         except json.JSONDecodeError:
-            pass
+            # 尝试修复未转义引号后重试
+            try:
+                fixed = _fix_unescaped_quotes(candidate)
+                json.loads(fixed)
+                return fixed
+            except (json.JSONDecodeError, Exception):
+                pass
 
     return raw
 
@@ -506,28 +550,36 @@ def run_claude_in_sandbox(
 
         # 6. 下载结果
         print(f"下载评审结果... [{time.time()-t0:.1f}s]")
-        try:
-            output_bytes = sandbox.fs.download_file(output_remote)
-            claude_output = output_bytes.decode("utf-8").strip()
-        except Exception as e:
-            print(f"下载 output.json 失败: {e}，尝试下载 raw_output.txt")
+        claude_output = ""
+        for remote_path, label in [(output_remote, "output.json"), (raw_remote, "raw_output.txt")]:
             try:
-                output_bytes = sandbox.fs.download_file(raw_remote)
-                claude_output = output_bytes.decode("utf-8").strip()
-            except Exception as e2:
-                result.error = f"下载评审结果失败: {e2}"
-                return result
+                output_bytes = sandbox.fs.download_file(remote_path)
+                candidate = output_bytes.decode("utf-8").strip()
+            except Exception as e:
+                print(f"下载 {label} 失败: {e}")
+                continue
+            if not candidate:
+                print(f"{label} 内容为空，跳过")
+                continue
+            print(f"已下载 {label}: {len(candidate)} 字符")
+            repaired = _try_repair_json(candidate)
+            try:
+                json.loads(repaired)
+                claude_output = repaired
+                break  # 成功解析，停止尝试
+            except json.JSONDecodeError as e:
+                print(f"{label} 修复后仍无法解析: {e}")
+                # 保留第一个下载的内容作为兜底
+                if not claude_output:
+                    claude_output = repaired
 
         if not claude_output:
             result.error = "Claude 返回空输出"
             return result
 
         result.raw_output = claude_output
-        print(f"已下载 {len(claude_output)} 字符")
 
-        # 7. 本地 JSON 修复
-        claude_output = _try_repair_json(claude_output)
-
+        # 7. 解析 JSON
         try:
             result_obj = json.loads(claude_output)
         except json.JSONDecodeError as e:
