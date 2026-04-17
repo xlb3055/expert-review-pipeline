@@ -14,6 +14,8 @@ Trace 用户内容提取器
 
 import json
 
+from core.trace_parser import _normalize_entry
+
 
 # Claude Code 本地命令噪音，需过滤
 _NOISE_PATTERNS = [
@@ -59,6 +61,21 @@ def _extract_tool_calls_summary(content) -> list:
         name = block.get("name", "unknown")
         inp = block.get("input", {})
         # 只保留输入的关键信息，截断长内容
+        summary = _summarize_tool_input(name, inp)
+        calls.append({"tool": name, "input_summary": summary})
+    return calls
+
+
+def _extract_tool_calls_from_toolCalls(tool_calls: list) -> list:
+    """从新格式的 toolCalls 列表中提取工具调用摘要。"""
+    calls = []
+    if not isinstance(tool_calls, list):
+        return calls
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        name = tc.get("name", "unknown")
+        inp = tc.get("input", {})
         summary = _summarize_tool_input(name, inp)
         calls.append({"tool": name, "input_summary": summary})
     return calls
@@ -137,24 +154,28 @@ def extract_user_focused_content(filepath: str,
             continue
 
         try:
-            entry = json.loads(line)
+            raw = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
 
-        if not isinstance(entry, dict):
+        if not isinstance(raw, dict):
+            continue
+
+        entry = _normalize_entry(raw)
+        if entry is None:
             continue
 
         entry_type = entry.get("type", "")
-        # 兼容新格式: entry.message
-        message = entry.get("message", {}) if isinstance(entry.get("message"), dict) else {}
 
         # ── 用户消息 ──
         if entry_type in ("human", "user"):
             if entry.get("isMeta", False):
                 continue
+            # 新格式中工具返回也标记为 type="user" + toolResults 字段，跳过
+            if entry.get("toolResults"):
+                continue
 
-            # 兼容两种格式
-            content = message.get("content") if message else entry.get("content")
+            content = entry.get("content")
             text = _extract_text_from_content(content)
 
             if not text or _is_noise(text):
@@ -173,24 +194,16 @@ def extract_user_focused_content(filepath: str,
 
         # ── Assistant 消息 ──
         elif entry_type == "assistant":
-            # 兼容两种格式
-            content = message.get("content") if message else entry.get("content")
+            content = entry.get("content")
 
-            # 提取工具调用摘要
+            # 提取工具调用摘要 —— 旧格式: content 列表中的 tool_use 块
             tool_calls = _extract_tool_calls_summary(content)
-            if not isinstance(content, list):
-                content_for_tools = []
-            else:
-                content_for_tools = content
 
-            # 也检查 message.content
-            if message and isinstance(message.get("content"), list):
-                tool_calls.extend(_extract_tool_calls_summary(message["content"]))
+            # 新格式: toolCalls 列表
+            tool_calls.extend(_extract_tool_calls_from_toolCalls(entry.get("toolCalls")))
 
             # 提取 AI 文本回复的摘要（仅前 150 字）
             ai_text = _extract_text_from_content(content)
-            if not ai_text and message:
-                ai_text = _extract_text_from_content(message.get("content"))
 
             parts_for_this = []
 

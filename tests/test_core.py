@@ -300,6 +300,106 @@ class TestTraceParser(unittest.TestCase):
             os.unlink(path)
 
 
+    def test_parse_new_recordType_format(self):
+        """新版 Claude Code session export 格式 (recordType=message)"""
+        from core.trace_parser import parse_trace_file
+        path = self._write_trace([
+            {"recordType": "session", "sessionId": "abc", "metrics": {"messageCount": 5}},
+            {"recordType": "message", "message": {
+                "type": "user", "text": "你好", "isMeta": False,
+            }},
+            {"recordType": "message", "message": {
+                "type": "assistant", "model": "claude-opus-4-6",
+                "text": "好的，我来帮你",
+                "toolCalls": [
+                    {"id": "tc1", "name": "Read", "input": {"file_path": "/tmp/test.py"}},
+                    {"id": "tc2", "name": "Bash", "input": {"command": "ls"}},
+                ],
+            }},
+            {"recordType": "message", "message": {
+                "type": "user", "text": "[tool_result] file content",
+                "toolResults": [{"toolUseId": "tc1", "content": "file content"}],
+            }},
+            {"recordType": "message", "message": {
+                "type": "assistant", "model": "claude-opus-4-6",
+                "text": "完成了",
+            }},
+            {"recordType": "message", "message": {
+                "type": "user", "text": "谢谢", "isMeta": False,
+            }},
+        ])
+        try:
+            result = parse_trace_file(path)
+            self.assertTrue(result.is_valid)
+            # 只有2条真正的用户消息（排除 toolResults 的那条）
+            self.assertEqual(result.conversation_rounds, 2)
+            self.assertEqual(result.model_name, "claude-opus-4-6")
+            self.assertTrue(result.is_sota_model)
+            self.assertTrue(result.has_tool_calls)
+            self.assertEqual(result.tool_call_count, 2)  # 2 toolCalls
+            self.assertEqual(result.total_lines, 6)
+        finally:
+            os.unlink(path)
+
+    def test_parse_new_format_non_opus(self):
+        """新格式下非 opus 模型的检测"""
+        from core.trace_parser import parse_trace_file
+        path = self._write_trace([
+            {"recordType": "session", "sessionId": "xyz"},
+            {"recordType": "message", "message": {
+                "type": "user", "text": "test",
+            }},
+            {"recordType": "message", "message": {
+                "type": "assistant", "model": "claude-sonnet-4-6",
+                "text": "ok",
+            }},
+        ])
+        try:
+            result = parse_trace_file(path)
+            self.assertTrue(result.is_valid)
+            self.assertEqual(result.conversation_rounds, 1)
+            self.assertFalse(result.is_sota_model)
+            self.assertIn("sonnet", result.model_name)
+        finally:
+            os.unlink(path)
+
+    def test_extractor_new_format(self):
+        """新格式下精简提取器能正确输出"""
+        from core.trace_extractor import extract_user_focused_content
+        path = self._write_trace([
+            {"recordType": "session", "sessionId": "abc"},
+            {"recordType": "message", "message": {
+                "type": "user", "text": "帮我写一个函数",
+            }},
+            {"recordType": "message", "message": {
+                "type": "assistant", "model": "claude-opus-4-6",
+                "text": "好的",
+                "toolCalls": [
+                    {"id": "tc1", "name": "Write", "input": {"file_path": "/tmp/f.py"}},
+                ],
+            }},
+            {"recordType": "message", "message": {
+                "type": "user", "text": "[tool_result] ok",
+                "toolResults": [{"toolUseId": "tc1", "content": "ok"}],
+            }},
+            {"recordType": "message", "message": {
+                "type": "assistant", "model": "claude-opus-4-6",
+                "text": "搞定了",
+            }},
+        ])
+        try:
+            content = extract_user_focused_content(path)
+            # 应该只有1轮用户消息，不含 tool_result 那条
+            self.assertIn("提取 1 轮用户消息", content)
+            self.assertIn("帮我写一个函数", content)
+            self.assertIn("[工具调用] Write", content)
+            self.assertIn("搞定了", content)
+            # 不应包含 tool_result 作为用户消息
+            self.assertNotIn("[第2轮", content)
+        finally:
+            os.unlink(path)
+
+
 class TestTraceBundle(unittest.TestCase):
     """测试 core/trace_bundle.py"""
 

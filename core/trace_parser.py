@@ -24,14 +24,59 @@ class TraceAnalysis:
     errors: list = field(default_factory=list)  # 解析错误信息
 
 
+def _normalize_entry(raw: dict) -> dict | None:
+    """
+    统一新旧两种 JSONL trace 格式为相同的内部表示。
+
+    格式A（旧 / Claude Code streaming）:
+        {"type": "human", "content": ..., "model": ...}
+    格式B（新 Claude Code session export）:
+        {"recordType": "message", "message": {"type": "user", "model": ..., "toolCalls": [...]}}
+
+    返回一个扁平 dict，字段与格式A对齐；若该行不代表消息则返回 None。
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    # 格式B: recordType 存在
+    if raw.get("recordType") == "session":
+        return None  # session 元数据行，跳过
+    if raw.get("recordType") == "message":
+        msg = raw.get("message")
+        if not isinstance(msg, dict):
+            return None
+        # 将嵌套的 message 字段提升到顶层，保留原始 entry 中可能存在的额外字段
+        normalized = dict(msg)  # type, model, text, isMeta, toolCalls, toolResults 等
+        # 把 content 统一：新格式用 text 字段作为纯文本, 用 toolCalls 存工具调用
+        # 保持兼容性: 如果 message 里没有 content 字段但有 text，构造 content
+        if "content" not in normalized and "text" in normalized:
+            normalized["content"] = normalized["text"]
+        return normalized
+
+    # 格式A: 没有 recordType，直接用顶层字段
+    # 也处理已有 type 的情况
+    if "type" in raw:
+        return raw
+
+    # 既没有 recordType 也没有 type，尝试从 message 子字段中提取（老版兼容）
+    msg = raw.get("message")
+    if isinstance(msg, dict) and "type" in msg:
+        normalized = dict(msg)
+        if "content" not in normalized and "text" in normalized:
+            normalized["content"] = normalized["text"]
+        return normalized
+
+    return raw  # 无法识别，返回原样让调用者跳过
+
+
 def parse_trace_file(filepath: str) -> TraceAnalysis:
     """
     逐行读取 JSONL trace 文件，提取统计信息。
 
-    轮次计算: 统计 type 为 "human" 的消息数量
+    轮次计算: 统计 type 为 "human"/"user" 的消息数量
     模型检测: 从 assistant 消息的 model 字段提取
     SOTA 判定: model 中包含 "opus"（不区分大小写）
-    工具调用: 检查 type 为 "tool_use" 或含 tool_use content 块的记录
+    工具调用: 检查 type 为 "tool_use"、含 tool_use content 块、或 toolCalls 字段的记录
     """
     analysis = TraceAnalysis()
 
@@ -59,55 +104,58 @@ def parse_trace_file(filepath: str) -> TraceAnalysis:
             continue
 
         try:
-            entry = json.loads(line)
+            raw = json.loads(line)
         except json.JSONDecodeError as e:
             analysis.errors.append(f"第 {i + 1} 行 JSON 解析失败: {e}")
             continue
 
-        if not isinstance(entry, dict):
+        entry = _normalize_entry(raw)
+        if entry is None:
             continue
 
         entry_type = entry.get("type", "")
 
-        # 兼容两种 trace 格式：
-        # 格式A（旧）: entry.content / entry.model（顶层）
-        # 格式B（新 Claude Code session）: entry.message.content / entry.message.model
-        message = entry.get("message", {}) if isinstance(entry.get("message"), dict) else {}
-
         # 统计用户消息轮次（兼容 "human" 和 "user" 两种格式）
         if entry_type in ("human", "user"):
             # 排除 isMeta 标记的系统消息
-            if not entry.get("isMeta", False):
+            # 排除 toolResults 消息（新格式中工具返回也标记为 type="user"）
+            if not entry.get("isMeta", False) and not entry.get("toolResults"):
                 analysis.conversation_rounds += 1
 
         # 提取模型名（从 assistant 消息）
         if entry_type == "assistant":
-            model = entry.get("model", "") or message.get("model", "")
+            model = entry.get("model", "")
             if model:
                 models_seen.add(model)
         # 兼容：某些 trace 格式在其他类型的记录中也有 model 字段
-        if "model" in entry and entry["model"]:
+        if entry.get("model"):
             models_seen.add(entry["model"])
-        if "model" in message and message["model"]:
-            models_seen.add(message["model"])
 
-        # 检测工具调用
+        # 检测工具调用 —— 旧格式: type="tool_use" 顶层条目
         if entry_type == "tool_use":
             analysis.has_tool_calls = True
             analysis.tool_call_count += 1
 
-        # 检查 assistant 消息中内嵌的 tool_use content 块
-        # 兼容格式A（entry.content）和格式B（entry.message.content）
+        # 检查 assistant 消息中内嵌的 tool_use content 块（格式A）
         if entry_type == "assistant":
-            for content_source in (entry.get("content", []), message.get("content", [])):
-                if isinstance(content_source, list):
-                    for block in content_source:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            analysis.has_tool_calls = True
-                            analysis.tool_call_count += 1
+            content = entry.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        analysis.has_tool_calls = True
+                        analysis.tool_call_count += 1
 
-        # 检查 tool_result 类型（证明确实执行了工具）
+        # 新格式: assistant 消息中的 toolCalls 列表
+        if entry_type == "assistant":
+            tool_calls = entry.get("toolCalls", [])
+            if isinstance(tool_calls, list) and tool_calls:
+                analysis.has_tool_calls = True
+                analysis.tool_call_count += len(tool_calls)
+
+        # 检查 tool_result / toolResults（证明确实执行了工具）
         if entry_type == "tool_result":
+            analysis.has_tool_calls = True
+        if entry.get("toolResults"):
             analysis.has_tool_calls = True
 
     # 确定模型名称
@@ -152,12 +200,13 @@ def truncate_trace_content(filepath: str, max_rounds: int = 50, max_bytes: int =
             continue
 
         try:
-            entry = json.loads(line_stripped)
+            raw = json.loads(line_stripped)
         except json.JSONDecodeError:
             continue
 
+        entry = _normalize_entry(raw) if isinstance(raw, dict) else raw
         if isinstance(entry, dict) and entry.get("type") in ("human", "user"):
-            if not entry.get("isMeta", False):
+            if not entry.get("isMeta", False) and not entry.get("toolResults"):
                 human_count += 1
 
         if human_count > max_rounds:
