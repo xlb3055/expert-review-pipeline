@@ -66,10 +66,7 @@ def _extract_archive(filepath: str, archive_type: str, extract_dir: str) -> list
                 out.write(chunk)
 
     elif archive_type == "rar":
-        _ensure_unrar()
-        import rarfile
-        with rarfile.RarFile(filepath) as rf:
-            rf.extractall(extract_dir)
+        _extract_rar(filepath, extract_dir)
 
     elif archive_type == "7z":
         try:
@@ -96,47 +93,54 @@ def _cmd_exists(cmd: str) -> bool:
     return which(cmd) is not None
 
 
-def _ensure_unrar():
-    """确保 unrar 命令可用，不可用时尝试自动安装。"""
-    if _cmd_exists("unrar"):
-        return
-    # 尝试安装
-    print("unrar 不可用，尝试自动安装...")
-    try:
-        subprocess.run(["pip", "install", "-q", "rarfile"], capture_output=True, timeout=30)
-    except Exception:
-        pass
-    # apt install unrar-free
-    try:
-        subprocess.run(["apt-get", "update", "-qq"], capture_output=True, timeout=60)
-        subprocess.run(["apt-get", "install", "-y", "-qq", "unrar-free"], capture_output=True, timeout=60)
-    except Exception:
-        pass
-    if _cmd_exists("unrar"):
-        print("unrar 安装成功")
-    else:
-        raise RuntimeError("无法安装 unrar，请在镜像中预装 unrar-free")
+def _extract_rar(filepath: str, extract_dir: str):
+    """解压 RAR 文件，按优先级尝试多种方式。"""
+    errors = []
 
-
-def _auto_install_unrar():
-    """运行时尝试 pip install rarfile，再 fallback 到 apt。"""
-    print("尝试自动安装 rar 解压支持...")
+    # 方式1: unrar-cffi（纯 pip，不需要系统命令）
     try:
-        subprocess.run(["pip", "install", "-q", "rarfile"], capture_output=True, timeout=30)
-        import importlib
-        importlib.import_module("rarfile")
-        print("rarfile 安装成功")
+        import unrar.cffi as unrar_cffi  # noqa: F401
+        import rarfile
+        rarfile.UNRAR_TOOL = "unrar-cffi"
+        with rarfile.RarFile(filepath) as rf:
+            rf.extractall(extract_dir)
         return
-    except Exception:
-        pass
-    # fallback: apt install unrar
-    try:
-        subprocess.run(["apt-get", "update", "-qq"], capture_output=True, timeout=60)
-        subprocess.run(["apt-get", "install", "-y", "-qq", "unrar-free"], capture_output=True, timeout=60)
-        if _cmd_exists("unrar"):
-            print("unrar 安装成功")
     except Exception as e:
-        print(f"自动安装 unrar 失败: {e}")
+        errors.append(f"unrar-cffi: {e}")
+
+    # 方式2: rarfile + 系统 unrar
+    try:
+        import rarfile
+        with rarfile.RarFile(filepath) as rf:
+            rf.extractall(extract_dir)
+        return
+    except Exception as e:
+        errors.append(f"rarfile: {e}")
+
+    # 方式3: 系统 7z 命令
+    if _cmd_exists("7z"):
+        try:
+            r = subprocess.run(["7z", "x", filepath, f"-o{extract_dir}", "-y"], capture_output=True, timeout=60)
+            if r.returncode == 0:
+                return
+            errors.append(f"7z exit={r.returncode}")
+        except Exception as e:
+            errors.append(f"7z: {e}")
+
+    # 方式4: 运行时 pip install
+    print("尝试运行时安装 rar 解压依赖...")
+    try:
+        subprocess.run(["pip", "install", "-q", "rarfile", "unrar-cffi"], capture_output=True, timeout=60)
+        import importlib
+        importlib.invalidate_caches()
+        rarfile_mod = importlib.import_module("rarfile")
+        with rarfile_mod.RarFile(filepath) as rf:
+            rf.extractall(extract_dir)
+        return
+    except Exception as e:
+        errors.append(f"pip install fallback: {e}")
+
+    raise RuntimeError(f"无法解压 RAR 文件，尝试了以下方式均失败: {'; '.join(errors)}")
 
 
 def _is_jsonl_content(filepath: str) -> bool:
