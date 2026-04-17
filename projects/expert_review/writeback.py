@@ -81,9 +81,6 @@ def determine_conclusion(expert_total: int, trace_total: int,
 
     返回: (conclusion_str, composite_score)
     """
-    if pre_screen_status == "拒绝":
-        return "不通过", 0.0
-
     score = compute_composite_score(expert_total, trace_total, expert_max, trace_max)
 
     if score >= pass_score:
