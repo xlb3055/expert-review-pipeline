@@ -171,8 +171,13 @@ def extract_user_focused_content(filepath: str,
         if entry_type in ("human", "user"):
             if entry.get("isMeta", False):
                 continue
-            # 新格式中工具返回也标记为 type="user" + toolResults 字段，跳过
-            if entry.get("toolResults"):
+            # 工具返回消息跳过（不同格式字段名不同）:
+            #   - 格式B (session export): toolResults
+            #   - 格式C (VSCode): toolUseResult 或 content 中含 tool_result 块
+            from core.trace_parser import _content_has_tool_result
+            if (entry.get("toolResults")
+                    or entry.get("toolUseResult")
+                    or _content_has_tool_result(entry.get("content"))):
                 continue
 
             content = entry.get("content")
