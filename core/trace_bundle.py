@@ -66,7 +66,9 @@ def _extract_archive(filepath: str, archive_type: str, extract_dir: str) -> list
                 out.write(chunk)
 
     elif archive_type == "rar":
-        # 优先用 unrar，fallback 到 7z
+        # 优先用 unrar，fallback 到 7z，都没有则动态安装
+        if not _cmd_exists("unrar") and not _cmd_exists("7z"):
+            _auto_install_unrar()
         if _cmd_exists("unrar"):
             subprocess.run(
                 ["unrar", "x", "-o+", filepath, extract_dir],
@@ -81,6 +83,8 @@ def _extract_archive(filepath: str, archive_type: str, extract_dir: str) -> list
             raise RuntimeError("未安装 unrar 或 7z，无法解压 .rar 文件")
 
     elif archive_type == "7z":
+        if not _cmd_exists("7z"):
+            _auto_install_7z()
         if not _cmd_exists("7z"):
             raise RuntimeError("未安装 7z，无法解压 .7z 文件")
         subprocess.run(
@@ -100,6 +104,45 @@ def _cmd_exists(cmd: str) -> bool:
     """检查系统命令是否存在。"""
     from shutil import which
     return which(cmd) is not None
+
+
+def _auto_install_unrar():
+    """运行时自动安装 unrar（适用于 Debian/Ubuntu 容器环境）。"""
+    print("尝试自动安装 unrar...")
+    try:
+        subprocess.run(
+            ["apt-get", "update", "-qq"],
+            capture_output=True, timeout=30,
+        )
+        subprocess.run(
+            ["apt-get", "install", "-y", "-qq", "unrar-free"],
+            capture_output=True, timeout=30,
+        )
+        if _cmd_exists("unrar"):
+            print("unrar 安装成功")
+        else:
+            # unrar-free 不可用，尝试 p7zip
+            _auto_install_7z()
+    except Exception as e:
+        print(f"自动安装 unrar 失败: {e}")
+
+
+def _auto_install_7z():
+    """运行时自动安装 7z（适用于 Debian/Ubuntu 容器环境）。"""
+    print("尝试自动安装 p7zip...")
+    try:
+        subprocess.run(
+            ["apt-get", "update", "-qq"],
+            capture_output=True, timeout=30,
+        )
+        subprocess.run(
+            ["apt-get", "install", "-y", "-qq", "p7zip-full"],
+            capture_output=True, timeout=60,
+        )
+        if _cmd_exists("7z"):
+            print("7z 安装成功")
+    except Exception as e:
+        print(f"自动安装 7z 失败: {e}")
 
 
 def _is_jsonl_content(filepath: str) -> bool:
