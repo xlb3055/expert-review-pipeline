@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+workspace/
+docs/generic_ai_review_node.md
+scripts/run_generic_ai_review.py
+scripts/run_generic_ai_review.sh
