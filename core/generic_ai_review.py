@@ -286,6 +286,8 @@ def unwrap_schema_envelope(result_obj: Any, schema_payload: Mapping[str, Any]) -
     queue: list[Any] = [result_obj]
     seen_texts: set[str] = set()
     visited = 0
+    best_candidate: dict[str, Any] | None = None
+    best_overlap = 0
 
     while queue and visited < 200:
         current = queue.pop(0)
@@ -310,9 +312,16 @@ def unwrap_schema_envelope(result_obj: Any, schema_payload: Mapping[str, Any]) -
             continue
 
         # 检查是否匹配 schema 根属性
-        if root_prop_keys and root_prop_keys.issubset(set(current.keys())):
-            _strip_extra_fields(current, schema_payload.get("schema", {}))
-            return current
+        if root_prop_keys:
+            overlap = len(root_prop_keys & set(current.keys()))
+            # 完全匹配：直接返回
+            if overlap == len(root_prop_keys):
+                _strip_extra_fields(current, schema_payload.get("schema", {}))
+                return current
+            # 记录最佳部分匹配（至少命中一半以上的 root key）
+            if overlap > best_overlap and overlap >= max(1, len(root_prop_keys) // 2):
+                best_candidate = current
+                best_overlap = overlap
 
         # 优先遍历已知包装键
         for key in _WRAPPER_KEYS:
@@ -329,7 +338,12 @@ def unwrap_schema_envelope(result_obj: Any, schema_payload: Mapping[str, Any]) -
             if isinstance(val, (dict, list, str)):
                 queue.append(val)
 
-    # BFS 未找到完全匹配的节点，回退到原始对象并尽力清理
+    # BFS 未找到完全匹配 —— 使用最佳部分匹配候选
+    if best_candidate is not None:
+        _strip_extra_fields(best_candidate, schema_payload.get("schema", {}))
+        return best_candidate
+
+    # 无任何候选，回退到原始对象并尽力清理
     _strip_extra_fields(result_obj, schema_payload.get("schema", {}))
     return result_obj
 

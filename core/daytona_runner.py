@@ -102,12 +102,33 @@ def try_extract_structured_output(obj):
     if isinstance(result, dict) and result:
         return result
     if isinstance(result, str) and result.strip():
+        text = result.strip()
+        # 直接解析
         try:
-            parsed = json.loads(result.strip())
+            parsed = json.loads(text)
             if isinstance(parsed, dict):
                 return parsed
         except json.JSONDecodeError:
             pass
+        # markdown 代码块
+        m = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+        if m:
+            try:
+                parsed = json.loads(m.group(1).strip())
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        # 首尾大括号截取
+        fb = text.find("{")
+        lb = text.rfind("}")
+        if fb != -1 and lb > fb:
+            try:
+                parsed = json.loads(text[fb:lb + 1])
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
     return None
 
 def try_repair(raw):
@@ -181,6 +202,9 @@ def _try_repair_json(raw: str) -> str:
         result = obj.get("result")
         if isinstance(result, dict) and result:
             return json.dumps(result, ensure_ascii=False)
+        # result 为字符串时递归修复（可能含 markdown 代码块）
+        if isinstance(result, str) and result.strip():
+            return _try_repair_json(result.strip())
         return raw
     except json.JSONDecodeError:
         pass
