@@ -66,22 +66,10 @@ def _extract_archive(filepath: str, archive_type: str, extract_dir: str) -> list
                 out.write(chunk)
 
     elif archive_type == "rar":
-        try:
-            import rarfile
-            with rarfile.RarFile(filepath) as rf:
-                rf.extractall(extract_dir)
-        except ImportError:
-            # fallback 到系统命令
-            if _cmd_exists("unrar"):
-                subprocess.run(["unrar", "x", "-o+", filepath, extract_dir], capture_output=True, timeout=60)
-            elif _cmd_exists("7z"):
-                subprocess.run(["7z", "x", filepath, f"-o{extract_dir}", "-y"], capture_output=True, timeout=60)
-            else:
-                _auto_install_unrar()
-                if _cmd_exists("unrar"):
-                    subprocess.run(["unrar", "x", "-o+", filepath, extract_dir], capture_output=True, timeout=60)
-                else:
-                    raise RuntimeError("无法解压 .rar 文件，请安装 rarfile (pip install rarfile)")
+        _ensure_unrar()
+        import rarfile
+        with rarfile.RarFile(filepath) as rf:
+            rf.extractall(extract_dir)
 
     elif archive_type == "7z":
         try:
@@ -106,6 +94,28 @@ def _cmd_exists(cmd: str) -> bool:
     """检查系统命令是否存在。"""
     from shutil import which
     return which(cmd) is not None
+
+
+def _ensure_unrar():
+    """确保 unrar 命令可用，不可用时尝试自动安装。"""
+    if _cmd_exists("unrar"):
+        return
+    # 尝试安装
+    print("unrar 不可用，尝试自动安装...")
+    try:
+        subprocess.run(["pip", "install", "-q", "rarfile"], capture_output=True, timeout=30)
+    except Exception:
+        pass
+    # apt install unrar-free
+    try:
+        subprocess.run(["apt-get", "update", "-qq"], capture_output=True, timeout=60)
+        subprocess.run(["apt-get", "install", "-y", "-qq", "unrar-free"], capture_output=True, timeout=60)
+    except Exception:
+        pass
+    if _cmd_exists("unrar"):
+        print("unrar 安装成功")
+    else:
+        raise RuntimeError("无法安装 unrar，请在镜像中预装 unrar-free")
 
 
 def _auto_install_unrar():
