@@ -127,20 +127,7 @@ def _extract_rar(filepath: str, extract_dir: str):
         except Exception as e:
             errors.append(f"7z: {e}")
 
-    # 方式4: 运行时 pip install
-    print("尝试运行时安装 rar 解压依赖...")
-    try:
-        subprocess.run(["pip", "install", "-q", "rarfile", "unrar-cffi"], capture_output=True, timeout=60)
-        import importlib
-        importlib.invalidate_caches()
-        rarfile_mod = importlib.import_module("rarfile")
-        with rarfile_mod.RarFile(filepath) as rf:
-            rf.extractall(extract_dir)
-        return
-    except Exception as e:
-        errors.append(f"pip install fallback: {e}")
-
-    raise RuntimeError(f"无法解压 RAR 文件，尝试了以下方式均失败: {'; '.join(errors)}")
+    raise RuntimeError(f"无法解压 RAR 文件，尝试了以下方式均失败: {'; '.join(errors)}。请确保镜像中已预装 rarfile + unrar-cffi")
 
 
 def _is_jsonl_content(filepath: str) -> bool:
