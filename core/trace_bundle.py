@@ -66,31 +66,33 @@ def _extract_archive(filepath: str, archive_type: str, extract_dir: str) -> list
                 out.write(chunk)
 
     elif archive_type == "rar":
-        # 优先用 unrar，fallback 到 7z，都没有则动态安装
-        if not _cmd_exists("unrar") and not _cmd_exists("7z"):
-            _auto_install_unrar()
-        if _cmd_exists("unrar"):
-            subprocess.run(
-                ["unrar", "x", "-o+", filepath, extract_dir],
-                capture_output=True, timeout=60,
-            )
-        elif _cmd_exists("7z"):
-            subprocess.run(
-                ["7z", "x", filepath, f"-o{extract_dir}", "-y"],
-                capture_output=True, timeout=60,
-            )
-        else:
-            raise RuntimeError("未安装 unrar 或 7z，无法解压 .rar 文件")
+        try:
+            import rarfile
+            with rarfile.RarFile(filepath) as rf:
+                rf.extractall(extract_dir)
+        except ImportError:
+            # fallback 到系统命令
+            if _cmd_exists("unrar"):
+                subprocess.run(["unrar", "x", "-o+", filepath, extract_dir], capture_output=True, timeout=60)
+            elif _cmd_exists("7z"):
+                subprocess.run(["7z", "x", filepath, f"-o{extract_dir}", "-y"], capture_output=True, timeout=60)
+            else:
+                _auto_install_unrar()
+                if _cmd_exists("unrar"):
+                    subprocess.run(["unrar", "x", "-o+", filepath, extract_dir], capture_output=True, timeout=60)
+                else:
+                    raise RuntimeError("无法解压 .rar 文件，请安装 rarfile (pip install rarfile)")
 
     elif archive_type == "7z":
-        if not _cmd_exists("7z"):
-            _auto_install_7z()
-        if not _cmd_exists("7z"):
-            raise RuntimeError("未安装 7z，无法解压 .7z 文件")
-        subprocess.run(
-            ["7z", "x", filepath, f"-o{extract_dir}", "-y"],
-            capture_output=True, timeout=60,
-        )
+        try:
+            import py7zr
+            with py7zr.SevenZipFile(filepath, mode="r") as sz:
+                sz.extractall(extract_dir)
+        except ImportError:
+            if _cmd_exists("7z"):
+                subprocess.run(["7z", "x", filepath, f"-o{extract_dir}", "-y"], capture_output=True, timeout=60)
+            else:
+                raise RuntimeError("无法解压 .7z 文件，请安装 py7zr (pip install py7zr)")
 
     # 收集解压出的所有文件
     extracted = []
@@ -107,42 +109,24 @@ def _cmd_exists(cmd: str) -> bool:
 
 
 def _auto_install_unrar():
-    """运行时自动安装 unrar（适用于 Debian/Ubuntu 容器环境）。"""
-    print("尝试自动安装 unrar...")
+    """运行时尝试 pip install rarfile，再 fallback 到 apt。"""
+    print("尝试自动安装 rar 解压支持...")
     try:
-        subprocess.run(
-            ["apt-get", "update", "-qq"],
-            capture_output=True, timeout=30,
-        )
-        subprocess.run(
-            ["apt-get", "install", "-y", "-qq", "unrar-free"],
-            capture_output=True, timeout=30,
-        )
+        subprocess.run(["pip", "install", "-q", "rarfile"], capture_output=True, timeout=30)
+        import importlib
+        importlib.import_module("rarfile")
+        print("rarfile 安装成功")
+        return
+    except Exception:
+        pass
+    # fallback: apt install unrar
+    try:
+        subprocess.run(["apt-get", "update", "-qq"], capture_output=True, timeout=60)
+        subprocess.run(["apt-get", "install", "-y", "-qq", "unrar-free"], capture_output=True, timeout=60)
         if _cmd_exists("unrar"):
             print("unrar 安装成功")
-        else:
-            # unrar-free 不可用，尝试 p7zip
-            _auto_install_7z()
     except Exception as e:
         print(f"自动安装 unrar 失败: {e}")
-
-
-def _auto_install_7z():
-    """运行时自动安装 7z（适用于 Debian/Ubuntu 容器环境）。"""
-    print("尝试自动安装 p7zip...")
-    try:
-        subprocess.run(
-            ["apt-get", "update", "-qq"],
-            capture_output=True, timeout=30,
-        )
-        subprocess.run(
-            ["apt-get", "install", "-y", "-qq", "p7zip-full"],
-            capture_output=True, timeout=60,
-        )
-        if _cmd_exists("7z"):
-            print("7z 安装成功")
-    except Exception as e:
-        print(f"自动安装 7z 失败: {e}")
 
 
 def _is_jsonl_content(filepath: str) -> bool:
