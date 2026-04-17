@@ -396,8 +396,7 @@ def _finalize(client: FeishuClient, app_token: str, table_id: str,
         json.dump(result_obj, f, ensure_ascii=False, indent=2)
     print(f"\n粗筛结果已保存: {result_path}")
 
-    # -- 主表回填 --
-    review_status_field = mfm.get("review_status", "审核状态")
+    # -- 主表回填（仅写机审说明，不改审核状态） --
     machine_note_field = mfm.get("machine_review_note", "机审说明")
 
     if status == "拒绝":
@@ -406,21 +405,11 @@ def _finalize(client: FeishuClient, app_token: str, table_id: str,
         machine_note = "【粗筛拒绝】\n" + "\n".join(f"- {r}" for r in reject_reasons)
         try:
             client.update_record(app_token, table_id, record_id, {
-                review_status_field: conclusion_map.get("reject", "已拒绝"),
                 machine_note_field: machine_note,
             })
             print("主表回填成功")
         except Exception as e:
             print(f"主表回填失败: {e}", file=sys.stderr)
-    elif status == "通过":
-        print("\n--- 主表回填（粗筛通过，进入AI评审） ---")
-        try:
-            client.update_record(app_token, table_id, record_id, {
-                review_status_field: conclusion_map.get("manual_review", "初审中"),
-            })
-            print("主表回填成功")
-        except Exception as e:
-            print(f"主表回填失败（非致命）: {e}", file=sys.stderr)
 
     print(f"\n===== 硬门槛初筛结束: {status} =====")
 
