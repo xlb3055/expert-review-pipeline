@@ -447,7 +447,13 @@ def run_generic_ai_review(request: GenericAIReviewRequest) -> GenericAIReviewOut
     try:
         schema_payload = normalize_schema_payload(request.schema_text)
         outcome = _execute_ai_review(request, schema_payload)
+        raw_keys = list(outcome.result_json.keys()) if isinstance(outcome.result_json, dict) else type(outcome.result_json).__name__
+        print(f"[unwrap] 原始结果 keys: {raw_keys}")
+        raw_preview = json.dumps(outcome.result_json, ensure_ascii=False)[:500] if outcome.result_json else "None"
+        print(f"[unwrap] 原始结果预览: {raw_preview}")
         result_obj = unwrap_schema_envelope(outcome.result_json, schema_payload)
+        unwrapped_keys = list(result_obj.keys()) if isinstance(result_obj, dict) else type(result_obj).__name__
+        print(f"[unwrap] 解包后 keys: {unwrapped_keys}")
         _auto_fill_totals(result_obj, schema_payload)
         validate_result_against_schema(result_obj, schema_payload)
         _write_json_file(request.output_path, result_obj)
