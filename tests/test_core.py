@@ -242,14 +242,14 @@ class TestTraceParser(unittest.TestCase):
             self.assertTrue(result.is_valid)
             self.assertEqual(result.conversation_rounds, 2)
             self.assertEqual(result.model_name, "claude-opus-4-20250514")
-            self.assertTrue(result.is_sota_model)
+            self.assertTrue(result.is_approved_model)
             self.assertTrue(result.has_tool_calls)
             self.assertGreaterEqual(result.tool_call_count, 1)
             self.assertEqual(result.total_lines, 5)
         finally:
             os.unlink(path)
 
-    def test_parse_non_opus_model(self):
+    def test_parse_claude_sonnet_model(self):
         from core.trace_parser import parse_trace_file
         path = self._write_trace([
             {"type": "human", "content": "test"},
@@ -258,7 +258,7 @@ class TestTraceParser(unittest.TestCase):
         try:
             result = parse_trace_file(path)
             self.assertTrue(result.is_valid)
-            self.assertFalse(result.is_sota_model)
+            self.assertTrue(result.is_approved_model)
             self.assertIn("sonnet", result.model_name)
         finally:
             os.unlink(path)
@@ -334,15 +334,15 @@ class TestTraceParser(unittest.TestCase):
             # 只有2条真正的用户消息（排除 toolResults 的那条）
             self.assertEqual(result.conversation_rounds, 2)
             self.assertEqual(result.model_name, "claude-opus-4-6")
-            self.assertTrue(result.is_sota_model)
+            self.assertTrue(result.is_approved_model)
             self.assertTrue(result.has_tool_calls)
             self.assertEqual(result.tool_call_count, 2)  # 2 toolCalls
             self.assertEqual(result.total_lines, 6)
         finally:
             os.unlink(path)
 
-    def test_parse_new_format_non_opus(self):
-        """新格式下非 opus 模型的检测"""
+    def test_parse_new_format_claude_sonnet(self):
+        """新格式下 claude-sonnet 模型应为 approved"""
         from core.trace_parser import parse_trace_file
         path = self._write_trace([
             {"recordType": "session", "sessionId": "xyz"},
@@ -358,8 +358,36 @@ class TestTraceParser(unittest.TestCase):
             result = parse_trace_file(path)
             self.assertTrue(result.is_valid)
             self.assertEqual(result.conversation_rounds, 1)
-            self.assertFalse(result.is_sota_model)
+            self.assertTrue(result.is_approved_model)
             self.assertIn("sonnet", result.model_name)
+        finally:
+            os.unlink(path)
+
+    def test_parse_gpt_model_approved(self):
+        """gpt 系列模型应为 approved"""
+        from core.trace_parser import parse_trace_file
+        path = self._write_trace([
+            {"type": "human", "content": "test"},
+            {"type": "assistant", "model": "gpt-4o", "content": []},
+        ])
+        try:
+            result = parse_trace_file(path)
+            self.assertTrue(result.is_approved_model)
+            self.assertEqual(result.model_name, "gpt-4o")
+        finally:
+            os.unlink(path)
+
+    def test_parse_unapproved_model(self):
+        """非 claude/gpt 模型应为 not approved"""
+        from core.trace_parser import parse_trace_file
+        path = self._write_trace([
+            {"type": "human", "content": "test"},
+            {"type": "assistant", "model": "glm-5-turbo", "content": []},
+        ])
+        try:
+            result = parse_trace_file(path)
+            self.assertFalse(result.is_approved_model)
+            self.assertEqual(result.model_name, "glm-5-turbo")
         finally:
             os.unlink(path)
 

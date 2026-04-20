@@ -17,7 +17,7 @@ class TraceAnalysis:
     is_valid: bool = False                # 文件是否有效
     conversation_rounds: int = 0          # 对话轮次（human 消息数量）
     model_name: str = ""                  # 使用的模型名
-    is_sota_model: bool = False           # 是否为 claude-opus 系列
+    is_approved_model: bool = False        # 是否为允许的模型（claude/gpt 系列）
     has_tool_calls: bool = False          # 是否包含工具调用记录
     tool_call_count: int = 0             # 工具调用次数
     total_lines: int = 0                  # JSONL 总行数
@@ -192,16 +192,17 @@ def parse_trace_file(filepath: str) -> TraceAnalysis:
 
     # 确定模型名称
     if models_seen:
-        # 优先选取 opus 模型，否则取最后一个
+        # 优先选取 claude/gpt 模型，否则取最后一个
         for m in models_seen:
-            if "opus" in m.lower():
+            if "claude" in m.lower() or "gpt" in m.lower():
                 analysis.model_name = m
                 break
         if not analysis.model_name:
             analysis.model_name = sorted(models_seen)[-1]
 
-    # 判断是否为 SOTA 模型（claude-opus 系列）
-    analysis.is_sota_model = "opus" in analysis.model_name.lower() if analysis.model_name else False
+    # 判断是否为允许的模型（claude / gpt 系列）
+    _name = analysis.model_name.lower() if analysis.model_name else ""
+    analysis.is_approved_model = bool(_name and ("claude" in _name or "gpt" in _name))
 
     return analysis
 
@@ -271,7 +272,7 @@ if __name__ == "__main__":
     print(f"有效: {result.is_valid}")
     print(f"对话轮次: {result.conversation_rounds}")
     print(f"模型: {result.model_name}")
-    print(f"是否 SOTA: {result.is_sota_model}")
+    print(f"模型合规: {result.is_approved_model}")
     print(f"有工具调用: {result.has_tool_calls}")
     print(f"工具调用次数: {result.tool_call_count}")
     print(f"总行数: {result.total_lines}")

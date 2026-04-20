@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-第一层：7 项硬门槛初筛
+第一层：8 项硬门槛初筛
 
 硬门槛标准：
   1. 任务真实性 — 来自真实工作场景，不是 demo、练习题、拼凑题
@@ -12,6 +12,7 @@
   5. 验证动作存在 — 至少有 1 次明确验证，不是"看起来可以"
   6. Trace-产物一致 — trace 中做的事情和最终提交物能对上
   7. 合规可用 — 可脱敏、无密钥、无敏感客户数据、无不可外发信息
+  8. 模型合规 — 必须使用 claude 或 gpt 系列模型
 
 退出码:
   0 = 通过（继续 AI 评审）
@@ -227,6 +228,31 @@ def check_trace_product_consistent(trace: TraceAnalysis, has_product: bool) -> d
     }
 
 
+def check_model_approved(trace: TraceAnalysis) -> dict:
+    """检查 8: 模型合规 — 必须使用 claude 或 gpt 系列模型。"""
+    if not trace.model_name:
+        return {
+            "check": "model_approved",
+            "passed": False,
+            "detail": "Trace 中未检测到模型名称，无法判断模型合规性",
+            "action": "manual_review",
+        }
+
+    if trace.is_approved_model:
+        return {
+            "check": "model_approved",
+            "passed": True,
+            "detail": f"使用模型 {trace.model_name}，属于允许的模型系列（claude/gpt）",
+        }
+
+    return {
+        "check": "model_approved",
+        "passed": False,
+        "detail": f"使用模型 {trace.model_name}，不属于允许的模型系列（仅允许 claude/gpt），请使用指定模型重新提交",
+        "action": "reject",
+    }
+
+
 def check_compliance(clean_trace: str) -> dict:
     """检查 7: 精简 trace 中不含明显密钥模式。
 
@@ -361,6 +387,11 @@ def run_pre_screen(record_id: str, project_dir: str) -> int:
     check7 = check_compliance(clean_trace)
     results.append(check7)
     print(f"[检查7] compliance_check: {'通过' if check7['passed'] else '不通过'} — {check7['detail']}")
+
+    # 检查 8: 模型合规（必须使用 claude/gpt 系列）
+    check8 = check_model_approved(trace)
+    results.append(check8)
+    print(f"[检查8] model_approved: {'通过' if check8['passed'] else '不通过'} — {check8['detail']}")
 
     # 汇总结果
     rejected = [r for r in results if not r["passed"] and r.get("action") == "reject"]
