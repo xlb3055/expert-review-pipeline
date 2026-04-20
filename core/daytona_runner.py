@@ -25,7 +25,7 @@ _DAYTONA_SYMBOLS = None
 class DaytonaRunConfig:
     """Daytona 沙箱 + Claude 执行配置。"""
     api_key: str = ""
-    snapshot: str = "daytona-medium"
+    snapshot: str = "claude-code-snapshot"
     cpu: int = 2
     memory: int = 4
     disk: int = 5

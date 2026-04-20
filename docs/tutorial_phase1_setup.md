@@ -565,7 +565,7 @@ export CLAUDE_TIMEOUT="600"
 
 **代理干扰**：本地若有 SOCKS 代理（`ALL_PROXY`、`HTTP_PROXY`），会导致 Daytona SDK 的文件上传失败。运行前先 `unset HTTP_PROXY HTTPS_PROXY ALL_PROXY`。
 
-**Snapshot 名称**：默认使用 `daytona-medium`（2 CPU / 4 GB）。如果你的 Daytona 账户有自定义 snapshot（如公司的 `claude-code-snapshot`），可通过 `SNAPSHOT_NAME` 环境变量指定。
+**Snapshot 名称**：默认使用 `claude-code-snapshot`（2 CPU / 4 GB）。可通过 `SNAPSHOT_NAME` 环境变量指定其他快照。
 
 **daytona-sdk 包名变更**：新版 SDK 的 import 路径是 `daytona_sdk`（不是 `daytona`），代码已做兼容。
 

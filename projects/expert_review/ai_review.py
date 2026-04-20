@@ -129,7 +129,7 @@ def _build_review_request(config: dict, project_dir: str, input_text: str) -> Ge
         timeout=timeout,
         openrouter_base_url=openrouter_base_url,
         daytona_snapshot=os.environ.get(
-            "SNAPSHOT_NAME", ai_cfg.get("sandbox_snapshot", "daytona-medium")
+            "SNAPSHOT_NAME", ai_cfg.get("sandbox_snapshot", "claude-code-snapshot")
         ),
         daytona_cpu=int(sandbox_res.get("cpu", 2)),
         daytona_memory=int(sandbox_res.get("memory", 2)),

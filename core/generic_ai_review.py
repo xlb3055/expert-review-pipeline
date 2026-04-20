@@ -65,7 +65,7 @@ class GenericAIReviewRequest:
     mode: str = DEFAULT_MODE
     timeout: int = DEFAULT_TIMEOUT
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    daytona_snapshot: str = "daytona-medium"
+    daytona_snapshot: str = "claude-code-snapshot"
     daytona_cpu: int = 2
     daytona_memory: int = 4
     daytona_disk: int = 5
@@ -109,7 +109,7 @@ def resolve_request_from_sources(
     timeout_default: int = DEFAULT_TIMEOUT,
     output_default: str = DEFAULT_OUTPUT_PATH,
     error_default: str = DEFAULT_ERROR_PATH,
-    daytona_snapshot: str = "daytona-medium",
+    daytona_snapshot: str = "claude-code-snapshot",
     daytona_cpu: int = 2,
     daytona_memory: int = 4,
     daytona_disk: int = 5,

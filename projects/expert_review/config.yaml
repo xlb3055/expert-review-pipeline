@@ -35,7 +35,7 @@ ai_review:
   schema_file: schema.json
   model: ""
   timeout: 600
-  sandbox_snapshot: "daytona-medium"
+  sandbox_snapshot: "claude-code-snapshot"
   sandbox_resources:
     cpu: 2
     memory: 2

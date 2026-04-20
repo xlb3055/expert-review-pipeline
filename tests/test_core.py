@@ -450,7 +450,7 @@ class TestDaytonaRunnerDataClasses(unittest.TestCase):
     def test_daytona_run_config_defaults(self):
         from core.daytona_runner import DaytonaRunConfig
         cfg = DaytonaRunConfig()
-        self.assertEqual(cfg.snapshot, "daytona-medium")
+        self.assertEqual(cfg.snapshot, "claude-code-snapshot")
         self.assertEqual(cfg.cpu, 2)
         self.assertEqual(cfg.memory, 4)
         self.assertEqual(cfg.timeout, 600)
